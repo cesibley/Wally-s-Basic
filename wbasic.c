@@ -791,7 +791,8 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
 
     // Output speed preference: 0.0 = Slow (slow), 1.0 = Fast (no delay)
     double output_speed;
-    double print_throttle_carry_ms;
+        double default_output_speed; /* speed to restore on RUN (cli/embedded/default) */
+double print_throttle_carry_ms;
     bool export_include_speed; // if true, embed output speed into exported headless builds
     bool show_splash;          // if true, show startup splash dialog (GUI only)
     GtkWidget *splash_dlg;     // active splash dialog (or NULL)
@@ -968,6 +969,14 @@ static inline void headless_ansi_move(int row, int col);
 static inline void headless_ansi_color_cache_reset(void);
 static inline void headless_ansi_apply_color(int fg, int bg);
 
+/*
+   Headless ANSI color caches.
+   Declared here so the CLI writer can compare against them, and initialized
+   to -1 so the first output forces a color emit.
+*/
+static int headless_last_fg = -1;
+static int headless_last_bg = -1;
+
 static void wbasic_cli_write_text_ansi(App *app, const char *s)
 {
     static bool bol = true; /* beginning-of-line */
@@ -994,12 +1003,22 @@ static void wbasic_cli_write_text_ansi(App *app, const char *s)
             continue;
         }
 
-        if (bol) {
-            if (headless_stdout_is_tty()) {
+        /*
+           IMPORTANT:
+           We reset attributes before every LF/CR to prevent background "banding".
+           That means the *next* printable output must re-assert the current BASIC
+           COLOR. Also, BASIC can change COLOR mid-line (e.g. PRINT 2;:COLOR 4:PRINT 4)
+           without a newline, so we must apply color changes even when bol==false.
+
+           Therefore: apply color whenever (a) we're at BOL, OR (b) the desired fg/bg
+           differs from the last applied fg/bg.
+        */
+        if (headless_stdout_is_tty()) {
+            if (bol || fg != headless_last_fg || bg != headless_last_bg) {
                 headless_ansi_apply_color(fg, bg);
             }
-            bol = false;
         }
+        if (bol) bol = false;
 
         if (*p == '\n') {
             fputs("\x1b[0m\n", stdout);
@@ -1144,7 +1163,7 @@ static void recent_clear(App *app) {
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
-static void out_clear(App *app);
+static void out_clear(App *app, bool terminal_clear);
 
 static void on_recent_item_activate(GtkMenuItem *mi, gpointer user_data) {
     App *app = (App*)user_data;
@@ -1163,7 +1182,7 @@ static void on_recent_item_activate(GtkMenuItem *mi, gpointer user_data) {
         return;
     }
 
-    out_clear(app);
+    out_clear(app, false);
     file_load_into_editor(app, path);
     app->stop_flag = false;
     set_run_state(app, RUN_IDLE);
@@ -2004,12 +2023,9 @@ static inline void headless_ansi_move(int row, int col) {
     fprintf(stdout, "\x1b[%d;%dH", row, col);
 }
 static inline void headless_ansi_clear(void) {
-    /* GNOME Terminal behaves best with home->clear->clear-scrollback */
-    fputs("\x1b[H\x1b[2J\x1b[3J", stdout);
+    /* Clear visible screen and home cursor (no scrollback clear). */
+    fputs("\x1b[2J\x1b[H", stdout);
 }
-
-static int headless_last_fg = -1;
-static int headless_last_bg = -1;
 
 static inline void headless_ansi_color_cache_reset(void) {
     headless_last_fg = -1;
@@ -2053,10 +2069,15 @@ static inline void headless_ansi_apply_color(int fg, int bg) {
 
     if (fg == headless_last_fg && bg == headless_last_bg) return;
 
-    /* Reset then set */
-    fputs("\x1b[0m", stdout);
-    if (fg != 16) fprintf(stdout, "\x1b[%dm", fg_map[fg & 15]);
-    if (bg != 16) fprintf(stdout, "\x1b[%dm", bg_map[bg & 15]);
+    /* IMPORTANT: Do NOT emit a global reset here.
+       - A reset (ESC[0m) immediately before cursor moves makes it appear that LOCATE resets color.
+       - We keep ESC[0m at end-of-line (before LF/CR) to prevent background "banding".
+       - Here, prefer targeted attribute changes (fg/bg only).
+    */
+    if (fg == 16) fputs("\x1b[39m", stdout);
+    else          fprintf(stdout, "\x1b[%dm", fg_map[fg & 15]);
+    if (bg == 16) fputs("\x1b[49m", stdout);
+    else          fprintf(stdout, "\x1b[%dm", bg_map[bg & 15]);
 
     headless_last_fg = fg;
     headless_last_bg = bg;
@@ -2124,7 +2145,7 @@ static void out_printf(App *app, const char *fmt, ...) {
 }
 
 
-static void out_clear(App *app) {
+static void out_clear(App *app, bool terminal_clear) {
     // Clear both GTK buffer and our screen buffer.
     if (!app) return;
 
@@ -2132,13 +2153,18 @@ static void out_clear(App *app) {
         app->cur_fg = 16;
         app->cur_bg = 16;
 #ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
         /* COLOR with no args => ANSI reset */
         fputs("\x1b[0m", stdout);
+    }
 #endif
     screen_clear(app);
 #ifdef WBASIC_NO_UI
     if (headless_stdout_is_tty()) {
-        headless_ansi_clear();
+        if (terminal_clear) {
+            headless_ansi_clear();
+        }
+        /* Always reset color cache on logical clear so next output re-applies color if needed. */
         headless_ansi_color_cache_reset();
         app->headless_cursor_dirty = false;
         fflush(stdout);
@@ -5408,8 +5434,8 @@ static bool exec_locate(App *app, Parser *p, int current_line) {
         headless_ansi_move(app->out_row, app->out_col);
         app->headless_cursor_dirty = false;
 
-        /* After LOCATE, ensure next output applies correct color prefix. */
-        headless_ansi_color_cache_reset();
+        /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
+        /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
         fflush(stdout);
     }
 #else
@@ -5431,8 +5457,10 @@ static bool exec_color(App *app, Parser *p, int current_line) {
         app->cur_fg = 16;
         app->cur_bg = 16;
 #ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
         /* COLOR with no args => ANSI reset */
         fputs("\x1b[0m", stdout);
+    }
 #endif
         // No need to re-render: COLOR affects subsequent output only.
         return true;
@@ -7590,7 +7618,7 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
-        out_clear(app);
+        out_clear(app, true);
         free(tmp);
         return true;
     }
@@ -8654,8 +8682,8 @@ static void runtime_reset(App *app) {
     for (int i = 0; i < 26; i++) app->def_type[i] = (unsigned char)DT_SNG;
     app->exec_pace_accum_us = 0.0;
 
-    /* Reset SPEED to default 100 on each RUN */
-    app->output_speed = 1.0;
+    /* Reset SPEED on each RUN (uses CLI/embedded/default baseline) */
+    app->output_speed = app->default_output_speed;
     app->print_throttle_carry_ms = 0.0;
 
     // clear stacks
@@ -8695,7 +8723,7 @@ static void runtime_reset(App *app) {
 static void maybe_do_pending_load(App *app);
 
 static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool clear_output, bool reset_vars) {
-    if (clear_output) out_clear(app);
+    if (clear_output) out_clear(app, false);
     if (!editor_to_program(app)) return;
 
     /* Build Block IF map once per RUN (parse/build-time, no runtime scanning) */
@@ -8858,8 +8886,10 @@ static void do_run(App *app) {
         app->cur_fg = 16;
         app->cur_bg = 16;
 #ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
         /* COLOR with no args => ANSI reset */
         fputs("\x1b[0m", stdout);
+    }
 #endif
 
     app->print_throttle_carry_ms = 0.0;
@@ -8916,7 +8946,7 @@ static void do_new(App *app) {
     program_free(&app->prog);
     program_init(&app->prog);
 
-    out_clear(app);
+    out_clear(app, false);
 
 #ifndef WBASIC_NO_UI
     /* UI/editor state only exists in the GTK interpreter. */
@@ -8980,7 +9010,7 @@ static void maybe_do_pending_load(App *app) {
     // We are idle now; clear any stop request.
     app->stop_flag = false;
 
-    if (app->pending_load_clear_output) out_clear(app);
+    if (app->pending_load_clear_output) out_clear(app, false);
     file_load_into_editor(app, app->pending_load_path);
 
     g_free(app->pending_load_path);
@@ -9008,7 +9038,7 @@ static void do_load(App *app, const char *arg) {
             app->pending_load_path = g_strdup(fn);
             app->pending_load_clear_output = true;
         } else {
-            out_clear(app);
+            out_clear(app, false);
             file_load_into_editor(app, fn);
             app->stop_flag = false;
             set_run_state(app, RUN_IDLE);
@@ -9032,7 +9062,7 @@ static void do_load(App *app, const char *arg) {
             app->pending_load_path = g_strdup(filename);
             app->pending_load_clear_output = true;
         } else {
-            out_clear(app);
+            out_clear(app, false);
             file_load_into_editor(app, filename);
             app->stop_flag = false;
             set_run_state(app, RUN_IDLE);
@@ -9534,7 +9564,7 @@ static void do_immediate(App *app, const char *cmdline) {
 
     if ((starts_ci(s, "CLS") && is_word_boundary(s[3])) ||
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
-        out_clear(app);
+        out_clear(app, true);
         free(tmp);
         return;
     }
@@ -10886,6 +10916,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
 
     /* Default speed: Fast (may be overridden by embedded define or --speed). */
     app.output_speed = 1.0;
+    app.default_output_speed = app.output_speed;
 
     /* Phase 3: PRINT-statement throttling tickle (UI pumps only during delays). */
     app.tickle.fn = NULL;
@@ -10949,6 +10980,8 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
             return 1;
         }
     }
+    app.default_output_speed = app.output_speed;
+
     app.headless_tty_fd = -1;
     app.headless_tty_inited = false;
     app.headless_tty_using_stdin = false;
@@ -11017,6 +11050,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
 
     app.font_css = gtk_css_provider_new();
     app.output_speed = 1.0;
+    app.default_output_speed = app.output_speed;
     app.export_include_speed = false;
     app.out_row = 1;
     app.out_col = 1;
@@ -11113,7 +11147,7 @@ static void on_menu_export_standalone(GtkMenuItem *mi, gpointer user_data) {
     if (!bas) { g_free(out_path); return; }
 
     char *buildlog = NULL;
-    int rc = export_standalone_from_text(bas, out_path, (int)llround(app->output_speed * 100.0), app->export_include_speed, &buildlog);
+    int rc = export_standalone_from_text(bas, out_path, (int)llround(app->default_output_speed * 100.0), app->export_include_speed, &buildlog);
 
     GtkWidget *msg;
     if (rc == 0) {
@@ -11234,6 +11268,7 @@ int wbasic_main(int argc, char **argv) {
     app.font_css = gtk_css_provider_new();
     // Defaults (may be overridden by prefs_load)
     app.output_speed = 1.0; // Fast
+    app.default_output_speed = app.output_speed;
     app.export_include_speed = false;
     // Output cursor starts at 1,1 (top-left) for LOCATE.
     app.out_row = 1;

@@ -1,0 +1,10 @@
+10 CLS
+20 X = 1 : Y = 1 : DX = 1 : DY = 1
+30 LOCATE Y, X : PRINT "O";
+40 X = X + DX : Y = Y + DY
+50 IF X >= 80 OR X <= 1 THEN DX = -DX
+60 IF Y >= 24 OR Y <= 1 THEN DY = -DY
+70 LOCATE Y, X : PRINT "O";
+80 FOR I = 1 TO 100 : NEXT I
+90 LOCATE Y, X : PRINT " ";
+100 GOTO 30
