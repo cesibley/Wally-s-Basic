@@ -11325,7 +11325,60 @@ app.screen = NULL;
     return 0;
 }
 #else
-int wbasic_main(int argc, char **argv) { (void)argc; (void)argv; fprintf(stderr, "This build is headless (WBASIC_NO_UI=1).\n"); return 1; }
+int wbasic_main(int argc, char **argv) {
+    // Headless CLI: wbasic_cli <file.bas> [-s N]
+    if (argc < 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+        fprintf(stderr,
+                "Usage: %s <file.bas> [-s N]\n"
+                "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n"
+                "  -h, --help                   Show this help and exit.\n",
+                (argc > 0 && argv[0]) ? argv[0] : "wbasic_cli");
+        return 1;
+    }
+
+    const char *in_bas = NULL;
+    // Find first non-option argument as the input BASIC file.
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        if (a[0] == '-') {
+            // Skip option argument for -s N or --speed N
+            if (!strcmp(a, "-s") || !strcmp(a, "--speed")) { i++; continue; }
+            continue;
+        }
+        in_bas = a;
+        break;
+    }
+
+    if (!in_bas) {
+        fprintf(stderr, "No input .bas file provided.\n");
+        return 1;
+    }
+
+    gchar *contents = NULL;
+    gsize len = 0;
+    if (!g_file_get_contents(in_bas, &contents, &len, NULL) || !contents) {
+        fprintf(stderr, "Failed to read: %s\n", in_bas);
+        return 1;
+    }
+
+    // wbasic_run_embedded parses runtime flags like -s/--speed. It does NOT expect the input filename
+    // to appear in argv, so strip it out before calling.
+    char *argv2[256];
+    int argc2 = 0;
+    argv2[argc2++] = argv[0];
+    for (int i = 1; i < argc && argc2 < 255; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        if (in_bas && !strcmp(a, in_bas)) continue; // drop input file
+        argv2[argc2++] = argv[i];
+    }
+    argv2[argc2] = NULL;
+
+    int rc = wbasic_run_embedded(argc2, argv2, contents);
+    g_free(contents);
+    return rc;
+}
 #endif /* WBASIC_NO_UI */
 #ifndef WBASIC_EMBEDDED_BUILD
 int main(int argc, char **argv) {
