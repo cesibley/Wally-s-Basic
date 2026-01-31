@@ -1,10 +1,11 @@
 # Wally's Basic (WBASIC)
 
 WBASIC is a GW-BASIC–style interpreter with a GTK3 user interface, focused on
-faithful classic BASIC behavior and a clean, portable C codebase.
+faithful classic BASIC behavior and a clean, portable C codebase.  Currently text
+only.  Graphic command are in planning.  
 
 ## Version
-**1.0** — January 29, 2026
+**1.05** — January 30, 2026
 
 ## Features
 - GW-BASIC–style syntax and semantics
@@ -16,6 +17,10 @@ faithful classic BASIC behavior and a clean, portable C codebase.
 - CLEAR, STOP, END, SYSTEM
 - GTK3 graphical interface
 - Headless (no-UI) build option
+
+## Limitations and differences
+- Text mode only
+- Files may ve "exported" to a Linux executable.  Run speeds increased by ~10x
 
 ## Building
 GTK build:
