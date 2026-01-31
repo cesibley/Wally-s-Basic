@@ -5390,10 +5390,10 @@ static bool exec_speed(App *app, Parser *p, int current_line);
 
 static bool exec_speed(App *app, Parser *p, int current_line)
 {
-    // SPEED n : n=0 (slowest) .. 100 (fastest)
+    // SPEED n : n=1 (slowest) .. 100 (fastest)
     skip_ws(p);
     if (*p->s == 0) {
-        runtime_error(app, current_line, "SPEED expects 0-100");
+        runtime_error(app, current_line, "SPEED expects 1-100");
         return false;
     }
 
@@ -5404,7 +5404,7 @@ static bool exec_speed(App *app, Parser *p, int current_line)
     }
 
     int n = (int)llround(v);
-    if (n < 0) n = 0;
+    if (n < 1) n = 1;
     if (n > 100) n = 100;
 
     if (app) {
