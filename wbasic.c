@@ -3810,7 +3810,6 @@ if (!v->is_array) {
             return true;
         } else {
             // scalar
-            if (v->is_array) { err_set(app, "Type mismatch"); free(name); return false; }
             if (v->kind != V_NUM) { err_set(app, "Type mismatch"); free(name); return false; }
             *out = v->num;
             free(name);
@@ -3867,12 +3866,43 @@ static bool parse_add(App *app, Parser *p, double *out) {
     return true;
 }
 
+static bool parse_relop(Parser *p, char opbuf[3]);
+static double basic_truth(bool b);
+
+
+static bool parse_rel(App *app, Parser *p, double *out) {
+    // Allow relational operators in numeric expressions (GW-BASIC semantics: TRUE=-1, FALSE=0)
+    double a = 0.0;
+    if (!parse_add(app, p, &a)) return false;
+
+    char op[3] = {0};
+    const char *save = p->s;
+    if (!parse_relop(p, op)) {
+        p->s = save;
+        *out = a;
+        return true;
+    }
+
+    double b = 0.0;
+    if (!parse_add(app, p, &b)) return false;
+
+    if (strcmp(op, "=") == 0) *out = basic_truth(a == b);
+    else if (strcmp(op, "<>") == 0) *out = basic_truth(a != b);
+    else if (strcmp(op, "<") == 0) *out = basic_truth(a < b);
+    else if (strcmp(op, ">") == 0) *out = basic_truth(a > b);
+    else if (strcmp(op, "<=") == 0) *out = basic_truth(a <= b);
+    else if (strcmp(op, ">=") == 0) *out = basic_truth(a >= b);
+    else return false;
+
+    return true;
+}
+
 static bool parse_bitand(App *app, Parser *p, double *out) {
-    if (!parse_add(app, p, out)) return false;
+    if (!parse_rel(app, p, out)) return false;
     for (;;) {
         if (!consume_word_ci(p, "AND")) break;
         double rhs = 0.0;
-        if (!parse_add(app, p, &rhs)) return false;
+        if (!parse_rel(app, p, &rhs)) return false;
         long long a = (long long)llround(*out);
         long long b = (long long)llround(rhs);
         *out = (double)(a & b);
@@ -4028,8 +4058,16 @@ static bool parse_cond_or(App *app, Parser *p, double *out) {
 }
 
 static bool eval_condition(App *app, Parser *p, bool *out) {
+    // Prefer full BASIC condition grammar (string relops, AND/OR/NOT precedence).
+    // As a compatibility fallback (for legacy programs), accept a numeric expression
+    // and treat nonzero as true (GW-BASIC truth: -1/0).
     double v = 0.0;
-    if (!parse_cond_or(app, p, &v)) return false;
+    const char *save = p->s;
+    if (!parse_cond_or(app, p, &v)) {
+        // fallback: numeric expression
+        p->s = save;
+        if (!parse_expr(app, p, &v)) return false;
+    }
     g_last_cond_v = v;
     *out = (v != 0.0);
     return true;
@@ -7057,7 +7095,7 @@ if (!v->is_array) {
             free(v->sarr[off]);
             v->sarr[off] = sv; // take ownership
         } else {
-            v->is_array = false;
+            // Scalar assignment should not destroy an existing array of the same name (GW-BASIC allows both).
             free(v->str);
             v->str = sv;
         }
@@ -7078,7 +7116,7 @@ if (!v->is_array) {
             nv = coerce_numeric_store(app, v, name, nv);
             v->arr[off] = nv;
         } else {
-            v->is_array = false;
+            // Scalar assignment should not destroy an existing array of the same name (GW-BASIC allows both).
             nv = coerce_numeric_store(app, v, name, nv);
             v->num = nv;
         }
