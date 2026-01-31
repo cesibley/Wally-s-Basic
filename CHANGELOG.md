@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## Updates
+
+- **SPEED command range clarified and tightened**
+  - SPEED is a WBASIC-specific command.
+  - Valid range is now **1 (slowest) to 100 (fastest)**.
+  - Values outside this range are **clamped**, not rejected:
+    - Values < 1 are treated as SPEED 1.
+    - Values > 100 are treated as SPEED 100.
+  - Documentation updated in the reference manual to reflect this behavior.
+
+---
+
 ## [V1.05] – GW-BASIC Compatibility & Core Semantics
 
 ### Added
