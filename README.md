@@ -19,7 +19,7 @@ only.  Graphic command are in planning.
 - Headless (no-UI) build option
 
 ## Limitations and differences
-- Text mode only
+- Text mode only.  Graphics modes in planning
 - Files may ve "exported" to a Linux executable.  Run speeds increased by ~10x
 
 ## Building
