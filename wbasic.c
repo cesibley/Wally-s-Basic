@@ -2148,6 +2148,7 @@ static void out_printf(App *app, const char *fmt, ...) {
 static void out_clear(App *app, bool terminal_clear) {
     // Clear both GTK buffer and our screen buffer.
     if (!app) return;
+    (void)terminal_clear; // silence unused in some builds
 
         // Reset to Preferences exact colors at each CLS/OUT_CLEAR.
         app->cur_fg = 16;
@@ -5117,6 +5118,7 @@ static void program_build_data_pool(Program *prog) {
     prog->data_ptr = 0;
 }
 
+static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_idx, int *stmt_idx);
 
 static bool exec_single_statement(App *app, const char *stmt, int current_line, int cur_li, int cur_si, int *line_idx, int *stmt_idx);
 
@@ -7192,6 +7194,17 @@ static bool exec_mid_assign(App *app, Parser *p, int current_line) {
     // Resolve target slot (string pointer we own)
     char **slot = NULL;
     if (targ_is_arr) {
+        // Auto-dimension undefined string arrays like GW-BASIC (default upper bound 10 per dimension)
+        if (!tv->is_array) {
+            app->option_base_locked = true;
+            int dim_max[5] = {10,10,10,10,10};
+            if (!var_define_str_array(tv, nd, app->option_base, dim_max)) {
+                free(rhs);
+                free(tname);
+                runtime_error(app, current_line, "Out of memory");
+                return false;
+            }
+        }
         if (!tv->is_array || !tv->sarr) { free(rhs); free(tname); runtime_error(app, current_line, "Subscript out of range"); return false; }
         size_t off = 0;
         if (!array_calc_offset(tv, nd, idx, &off)) { free(rhs); free(tname); runtime_error(app, current_line, "Subscript out of range"); return false; }
@@ -7451,6 +7464,18 @@ if (starts_ci(s, "READ") && is_word_boundary(s[4])) {
             v->kind = V_STR;
             char *sv = xstrdup(di.text ? di.text : "");
             if (is_arr_elem) {
+                // Auto-dimension undefined string arrays like GW-BASIC (default upper bound 10 per dimension)
+                if (!v->is_array) {
+                    app->option_base_locked = true;
+                    int dim_max[5] = {10,10,10,10,10};
+                    if (!var_define_str_array(v, nd, app->option_base, dim_max)) {
+                        free(sv);
+                        free(name);
+                        free(tmp);
+                        runtime_error(app, current_line, "Out of memory");
+                        return false;
+                    }
+                }
                 if (!v->is_array || !v->sarr) { free(sv); free(name); free(tmp); runtime_error(app, current_line, "Subscript out of range"); return false; }
                 size_t off = 0;
                 if (!array_calc_offset(v, nd, idx, &off)) { free(sv); free(name); free(tmp); runtime_error(app, current_line, "Subscript out of range"); return false; }
@@ -7480,6 +7505,17 @@ if (starts_ci(s, "READ") && is_word_boundary(s[4])) {
 
             v->kind = V_NUM;
             if (is_arr_elem) {
+                // Auto-dimension undefined numeric arrays like GW-BASIC (default upper bound 10 per dimension)
+                if (!v->is_array) {
+                    app->option_base_locked = true;
+                    int dim_max[5] = {10,10,10,10,10};
+                    if (!var_define_num_array(v, nd, app->option_base, dim_max)) {
+                        free(name);
+                        free(tmp);
+                        runtime_error(app, current_line, "Out of memory");
+                        return false;
+                    }
+                }
                 if (!v->is_array || !v->arr) { free(name); free(tmp); runtime_error(app, current_line, "Subscript out of range"); return false; }
                 size_t off = 0;
                 if (!array_calc_offset(v, nd, idx, &off)) { free(name); free(tmp); runtime_error(app, current_line, "Subscript out of range"); return false; }
@@ -7638,6 +7674,14 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
     if (starts_ci(s, "MID$")) {
         Parser mp = { s };
         bool ok = exec_mid_assign(app, &mp, current_line);
+        free(tmp);
+        return ok;
+    }
+
+
+    // RUN [line]
+    if (starts_ci(s, "RUN") && is_word_boundary(s[3])) {
+        bool ok = exec_run_stmt(app, s, current_line, line_idx, stmt_idx);
         free(tmp);
         return ok;
     }
@@ -8936,6 +8980,90 @@ static void do_run(App *app) {
 
     // RUN clears output and resets variables (classic BASIC behavior)
     do_exec_from(app, 0, 0, true, true);
+}
+
+/* ------------------------------------------------------------
+ * RUN statement (GW-BASIC): restart program execution.
+ *
+ * Supported forms:
+ *   RUN
+ *   RUN <line-number>
+ *
+ * Semantics:
+ *   - reset runtime state (vars/stacks/DATA pointer/options)
+ *   - clear output (WBASIC policy; programs typically CLS before RUN)
+ *   - jump to first statement (or the requested line)
+ *
+ * Note: Implemented as an in-loop control transfer (not a nested do_exec_from)
+ * so it works safely inside ':' chains like "CLS:RUN".
+ * ------------------------------------------------------------ */
+static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_idx, int *stmt_idx)
+{
+    /* Parse optional line number */
+    Parser rp = { s + 3 };
+    skip_ws(&rp);
+
+    int target_line_no = 0;
+    bool has_target = false;
+    if (*rp.s) {
+        double dv = 0.0;
+        if (!parse_expr(app, &rp, &dv)) {
+            runtime_error(app, current_line, "Bad RUN target");
+            return false;
+        }
+        int n = (int)dv;
+        if (fabs(dv - (double)n) > 1e-9 || n < 0) {
+            runtime_error(app, current_line, "Bad RUN target");
+            return false;
+        }
+        skip_ws(&rp);
+        if (*rp.s != 0) {
+            runtime_error(app, current_line, "Syntax error");
+            return false;
+        }
+        target_line_no = n;
+        has_target = true;
+    }
+
+    /* Rebuild Block IF map (safe; program may have changed before RUN) */
+    if (!program_build_ifmap(app)) {
+        /* runtime_error already reported */
+        set_run_state(app, RUN_STOPPED);
+        return false;
+    }
+
+    /* Reset colors to preference defaults until BASIC COLOR is used */
+    app->cur_fg = 16;
+    app->cur_bg = 16;
+#ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
+        /* COLOR with no args => ANSI reset */
+        fputs("\x1b[0m", stdout);
+    }
+#endif
+
+    app->print_throttle_carry_ms = 0.0;
+    key_macro_queue_clear(app);
+
+    /* WBASIC RUN policy: clear output and reset runtime state */
+    out_clear(app, false);
+    runtime_reset(app);
+    program_build_data_pool(&app->prog);
+
+    int start_idx = 0;
+    if (has_target && target_line_no > 0) {
+        int idx = program_find_index(&app->prog, target_line_no);
+        if (idx < 0) {
+            runtime_error(app, current_line, "Undefined line number");
+            return false;
+        }
+        start_idx = idx;
+    }
+
+    /* Jump execution */
+    *line_idx = start_idx;
+    *stmt_idx = 0;
+    return true;
 }
 
 static void do_stop(App *app) {

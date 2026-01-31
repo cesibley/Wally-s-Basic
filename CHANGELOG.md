@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## [V1.05] – GW-BASIC Compatibility & Core Semantics
+
+### Added
+- Auto-dimensioning of arrays (GW-BASIC compatible):
+  - Arrays are implicitly DIM’d on first subscripted use.
+  - Default bounds are 0 TO 10 per dimension.
+  - Dimension count inferred from first use.
+  - Applies to both numeric and string arrays.
+  - Works through READ/DATA.
+  - Works through MID$ l-value assignment on array elements.
+  - DIM after implicit creation correctly raises an error.
+
+- RUN statement implemented:
+  - RUN is now a true statement (not parsed as an assignment).
+  - Legal in statement chains (e.g. `CLS:RUN`).
+  - RUN fully resets program state:
+    - Numeric variables reset to 0.
+    - String variables reset to "".
+    - Arrays cleared and deallocated.
+    - FOR / WHILE / GOSUB stacks cleared.
+    - DEFxxx functions reset.
+    - OPTION BASE reset and unlocked.
+    - DATA pool rebuilt and READ pointer reset.
+
+### Improved
+- Legacy programs relying on `CLS:RUN` now execute correctly.
+- STARTREK.bas added as a reference compatibility demo.
+
+---
+
+## [V1.04] – Skipped
+
+---
+
 ## [V1.03] – GW-BASIC Compatibility Fixes
 
 ### Fixed
@@ -17,6 +51,8 @@
 ### Added
 - Added demos/bench.bas.
 
+---
+
 ## [V1.01] – Headless Rendering Fixes
 
 ### Fixed
@@ -32,6 +68,7 @@
 - CLS remains a hard screen reset.
 
 ---
+
 ## [V1.00] – Initial Stable Release
 - Core GW-BASIC compatible language.
 - GTK interpreter and headless exporter.
