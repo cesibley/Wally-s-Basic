@@ -2,6 +2,13 @@
 
 ## Updates
 
+- **Windows/MSYS2 portability improvements**
+  - Updated code base to support Windows build and execution
+  - Added MSYS2/MinGW build and runtime guidance, including PATH setup tips and drive navigation.
+  - Added a Windows batch helper to set MSYS2 MinGW PATH entries for a Command Prompt session.
+  - Improved Win32 compatibility in headless/export builds (Sleep delay path, portable case-insensitive search, stdint include, and localtime_s usage).
+  - Guarded POSIX-only headers and headless TTY handling to prevent Windows build errors.
+
 - **SPEED command range clarified and tightened**
   - SPEED is a WBASIC-specific command.
   - Valid range is now **1 (slowest) to 100 (fastest)**.

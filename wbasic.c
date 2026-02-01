@@ -101,6 +101,25 @@
 
 #include <time.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static const char *wbasic_ascii_strcasestr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle || *needle == '\0') return haystack;
+
+    const char *h = haystack;
+    const size_t needle_len = strlen(needle);
+
+    for (; *h; h++) {
+        if (g_ascii_strncasecmp(h, needle, needle_len) == 0) {
+            return h;
+        }
+    }
+
+    return NULL;
+}
 
 typedef void (*wbasic_tickle_fn)(void *user);
 
@@ -120,6 +139,9 @@ static void wbasic_delay_ms(int ms, const WbasicTickle *tickle)
     while (remaining > 0) {
         int step = (remaining > slice_ms) ? slice_ms : remaining;
 
+#ifdef _WIN32
+        Sleep((DWORD)step);
+#else
         struct timespec ts;
         ts.tv_sec  = step / 1000;
         ts.tv_nsec = (long)(step % 1000) * 1000000L;
@@ -127,6 +149,7 @@ static void wbasic_delay_ms(int ms, const WbasicTickle *tickle)
         while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
             /* retry */
         }
+#endif
 
         if (tickle && tickle->fn) {
             tickle->fn(tickle->user);
@@ -445,7 +468,7 @@ static char *xstrdup(const char *s) {
 
 #include <ctype.h>
 #include <time.h>
-#ifdef WBASIC_NO_UI
+#if defined(WBASIC_NO_UI) && !defined(_WIN32)
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -461,6 +484,7 @@ static char *xstrdup(const char *s) {
 #include <glib.h>
 
 #include <stddef.h>   /* for NULL */
+#include <stdint.h>
 
 
 
@@ -715,7 +739,11 @@ typedef struct App {
     char inkey_char;
 #ifdef WBASIC_NO_UI
     int headless_tty_fd;
+#ifdef _WIN32
+    void *headless_tty_old;
+#else
     struct termios headless_tty_old;
+#endif
     bool headless_tty_inited;
     bool headless_tty_using_stdin;
     bool headless_cursor_dirty; /* legacy safety net: LOCATE now moves cursor immediately */
@@ -3524,7 +3552,13 @@ static bool parse_factor(App *app, Parser *p, double *out) {
             }
             if (!strcasecmp(name, "TIMER")) {
                 struct timeval tv; gettimeofday(&tv, NULL);
-                struct tm lt; time_t t = tv.tv_sec; localtime_r(&t, &lt);
+                struct tm lt;
+                time_t t = tv.tv_sec;
+#ifdef _WIN32
+                localtime_s(&lt, &t);
+#else
+                localtime_r(&t, &lt);
+#endif
                 double sec = (double)(lt.tm_hour*3600 + lt.tm_min*60 + lt.tm_sec) + (double)tv.tv_usec/1e6;
                 *out = sec;
                 free(name);
@@ -3610,7 +3644,13 @@ if (!strcasecmp(name, "ERL")) {
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
                     struct timeval tv; gettimeofday(&tv, NULL);
-                    struct tm lt; time_t t = tv.tv_sec; localtime_r(&t, &lt);
+                    struct tm lt;
+                    time_t t = tv.tv_sec;
+#ifdef _WIN32
+                    localtime_s(&lt, &t);
+#else
+                    localtime_r(&t, &lt);
+#endif
                     double sec = (double)(lt.tm_hour*3600 + lt.tm_min*60 + lt.tm_sec) + (double)tv.tv_usec/1e6;
                     *out = sec;
                     free(name);
@@ -3675,7 +3715,13 @@ if (!strcasecmp(name, "ERL")) {
                 if (!strcasecmp(name, "CINT")) { *out = floor(arg + 0.5); free(name); return true; }
                 if (!strcasecmp(name, "TIMER")) {
                     struct timeval tv; gettimeofday(&tv, NULL);
-                    struct tm lt; time_t t = tv.tv_sec; localtime_r(&t, &lt);
+                    struct tm lt;
+                    time_t t = tv.tv_sec;
+#ifdef _WIN32
+                    localtime_s(&lt, &t);
+#else
+                    localtime_r(&t, &lt);
+#endif
                     double sec = (double)(lt.tm_hour*3600 + lt.tm_min*60 + lt.tm_sec) + (double)tv.tv_usec/1e6;
                     *out = sec; free(name); return true;
                 }
@@ -4075,7 +4121,25 @@ static bool eval_condition(App *app, Parser *p, bool *out) {
 }
 
 
-#ifdef WBASIC_NO_UI
+#if defined(WBASIC_NO_UI) && defined(_WIN32)
+static void headless_tty_init(App *app) {
+    if (!app || app->headless_tty_inited) return;
+    app->headless_tty_fd = -1;
+    app->headless_tty_using_stdin = false;
+    app->headless_tty_inited = true;
+}
+
+static void headless_tty_shutdown(App *app) {
+    if (!app || !app->headless_tty_inited) return;
+    app->headless_tty_fd = -1;
+    app->headless_tty_inited = false;
+    app->headless_tty_using_stdin = false;
+}
+
+static void headless_try_read_inkey(App *app) {
+    if (!app || app->inkey_ready) return;
+}
+#elif defined(WBASIC_NO_UI) && !defined(_WIN32)
 static void do_stop(App *app);
 
 static void headless_tty_init(App *app) {
@@ -4156,7 +4220,7 @@ static void headless_try_read_inkey(App *app) {
     }
 }
 
-#endif /* WBASIC_NO_UI */
+#endif /* WBASIC_NO_UI && !_WIN32 */
 
 /* ===================== String value parsing ===================== */
 
@@ -4510,7 +4574,11 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
 
             time_t t = time(NULL);
             struct tm lt;
+#ifdef _WIN32
+            localtime_s(&lt, &t);
+#else
             localtime_r(&t, &lt);
+#endif
 
             char buf[64];
             if (!strcasecmp(name, "DATE$")) {
@@ -8545,7 +8613,7 @@ static bool stmt_is_block_elseif(const char *stmt)
     while (*s && isspace((unsigned char)*s)) s++;
     if (*s == 0) return false; /* no condition */
 
-    const char *thenp = strcasestr(s, "THEN");
+    const char *thenp = wbasic_ascii_strcasestr(s, "THEN");
     if (!thenp) return false;
     /* Ensure something before THEN (condition not empty) */
     const char *q = thenp;

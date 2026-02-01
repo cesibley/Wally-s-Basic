@@ -35,6 +35,9 @@ clear && gcc -DWBASIC_NO_UI wbasic.c -o wbasic \
   $(pkg-config --cflags --libs glib-2.0) -lm
 ```
 
+## Windows (MSYS2)
+See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
+
 ## Running
 ```sh
 ./wbasic
