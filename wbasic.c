@@ -11285,6 +11285,14 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.current_path = NULL;
     app.dirty = false;
     app.suppress_dirty = false;
+    app.show_splash = true;
+    app.splash_dlg = NULL;
+    app.deferred_startup_file = NULL;
+    app.deferred_autorun = false;
+    app.show_splash = true;
+    app.splash_dlg = NULL;
+    app.deferred_startup_file = NULL;
+    app.deferred_autorun = false;
 
     app.font_css = gtk_css_provider_new();
     app.output_speed = 1.0;
@@ -11502,6 +11510,10 @@ int wbasic_main(int argc, char **argv) {
     app.current_path = NULL;
     app.dirty = false;
     app.suppress_dirty = false;
+    app.show_splash = true;
+    app.splash_dlg = NULL;
+    app.deferred_startup_file = NULL;
+    app.deferred_autorun = false;
 
     app.font_css = gtk_css_provider_new();
     // Defaults (may be overridden by prefs_load)
