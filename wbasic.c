@@ -10024,14 +10024,6 @@ static void pref_on_reset(GtkButton *btn, gpointer user_data) {
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
-static void pref_on_export_include_speed(GtkToggleButton *btn, gpointer user_data)
-{
-    App *app = (App *)user_data;
-    if (!app) return;
-    app->export_include_speed = gtk_toggle_button_get_active(btn) ? true : false;
-    prefs_save(app);
-}
-
 static void pref_on_show_splash(GtkToggleButton *btn, gpointer user_data)
 {
     App *app = (App *)user_data;
@@ -10079,17 +10071,8 @@ static void show_preferences(App *app) {
 
         // Endpoint labels
 
-    GtkWidget *chk_export_speed = gtk_check_button_new_with_label("Include speed control in exported programs");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_export_speed), app->export_include_speed ? TRUE : FALSE);
-    g_signal_connect(chk_export_speed, "toggled", G_CALLBACK(pref_on_export_include_speed), app);
-
     GtkWidget *btn_reset = gtk_button_new_with_label("Reset Colors");
     g_signal_connect(btn_reset, "clicked", G_CALLBACK(pref_on_reset), app);
-
-    GtkWidget *sep_font_speed = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_widget_set_hexpand(sep_font_speed, TRUE);
-    gtk_widget_set_margin_top(sep_font_speed, 8);
-    gtk_widget_set_margin_bottom(sep_font_speed, 8);
 
     gtk_grid_attach(GTK_GRID(grid), lbl_fg, 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), btn_fg, 1, 0, 1, 1);
@@ -10099,10 +10082,6 @@ static void show_preferences(App *app) {
     gtk_grid_attach(GTK_GRID(grid), btn_reset, 1, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), lbl_font, 0, 3, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), btn_font, 1, 3, 1, 1);
-    /* Visual separation between font and speed controls */
-    gtk_grid_attach(GTK_GRID(grid), sep_font_speed, 0, 4, 2, 1);
-        gtk_grid_attach(GTK_GRID(grid), chk_export_speed, 1, 5, 1, 1);
-
     GtkWidget *sep_splash = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_hexpand(sep_splash, TRUE);
     gtk_widget_set_margin_top(sep_splash, 10);
@@ -10112,8 +10091,8 @@ static void show_preferences(App *app) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_splash), app->show_splash ? TRUE : FALSE);
     g_signal_connect(chk_splash, "toggled", G_CALLBACK(pref_on_show_splash), app);
 
-    gtk_grid_attach(GTK_GRID(grid), sep_splash, 0, 7, 2, 1);
-    gtk_grid_attach(GTK_GRID(grid), chk_splash, 1, 8, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), sep_splash, 0, 4, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), chk_splash, 1, 5, 1, 1);
 
     gtk_widget_show_all(dlg);
     gtk_dialog_run(GTK_DIALOG(dlg));
