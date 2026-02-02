@@ -1949,7 +1949,7 @@ static void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
     snprintf(tagname_out, 32, "clr_%d_%d", fg, bg);
 
     GtkTextTagTable *tt = gtk_text_buffer_get_tag_table(app->output_buf);
-    if (gtk_text_tag_table_lookup(tt, tagname_out)) return;
+    GtkTextTag *existing = gtk_text_tag_table_lookup(tt, tagname_out);
 
     const char *fg_hex = NULL;
     const char *bg_hex = NULL;
@@ -1985,10 +1985,20 @@ static void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
         bg_hex = vga16_hex[bg & 15];
     }
 
+    if (existing) {
+        if (fg == 16 || bg == 16) {
+            g_object_set(existing,
+                         "foreground", fg_hex,
+                         "background", bg_hex,
+                         NULL);
+        }
+        return;
+    }
+
     gtk_text_buffer_create_tag(app->output_buf, tagname_out,
                                "foreground", fg_hex,
                                "background", bg_hex,
-    NULL);
+                               NULL);
 }
 #endif /* !WBASIC_NO_UI */
 
@@ -8960,7 +8970,10 @@ static void runtime_reset(App *app) {
 static void maybe_do_pending_load(App *app);
 
 static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool clear_output, bool reset_vars) {
-    if (clear_output) out_clear(app, false);
+    if (clear_output) {
+        out_clear(app, false);
+        screen_render_flush(app);
+    }
     if (!editor_to_program(app)) return;
 
     /* Build Block IF map once per RUN (parse/build-time, no runtime scanning) */

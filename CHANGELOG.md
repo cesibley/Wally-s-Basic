@@ -1,6 +1,8 @@
 # CHANGELOG
 
 ## Patches
+- Update existing GTK color tags so preference-based default colors are refreshed when a program 
+  runs, ensuring output uses current preference colors.
 - Removed the obsolete export speed checkbox from the Preferences dialog and tightened the layout
   by collapsing the extra row spacing around the splash option.
 - Fixed issues with Windows exe not supporting dark mode
