@@ -204,6 +204,87 @@ static double wbasic_compute_print_delay_ms_f_from_output_speed(double output_sp
 #ifndef WBASIC_NO_UI
 #include <gtk/gtk.h>
 
+#ifdef _WIN32
+#include <gdk/gdkwin32.h>
+
+static gboolean windows_prefers_dark_mode(void) {
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    LONG rc = RegGetValueA(
+        HKEY_CURRENT_USER,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        "AppsUseLightTheme",
+        RRF_RT_REG_DWORD,
+        &type,
+        &value,
+        &size
+    );
+    if (rc == ERROR_SUCCESS && type == REG_DWORD) {
+        return value == 0;
+    }
+    return FALSE;
+}
+
+static void apply_windows_dark_mode_preference(void) {
+    GtkSettings *settings = gtk_settings_get_default();
+    if (!settings) return;
+    g_object_set(settings,
+                 "gtk-application-prefer-dark-theme",
+                 windows_prefers_dark_mode(),
+                 NULL);
+}
+
+static void apply_windows_dark_titlebar(GtkWidget *widget) {
+    if (!windows_prefers_dark_mode()) return;
+    if (!gtk_widget_get_realized(widget)) return;
+
+    GdkWindow *gdk_win = gtk_widget_get_window(widget);
+    if (!gdk_win) return;
+
+    HWND hwnd = gdk_win32_window_get_handle(gdk_win);
+    if (!hwnd) return;
+
+    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    if (!dwm) return;
+
+    typedef HRESULT (WINAPI *DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
+    DwmSetWindowAttributeFn set_attr =
+        (DwmSetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if (!set_attr) {
+        FreeLibrary(dwm);
+        return;
+    }
+
+    BOOL enabled = TRUE;
+    const DWORD dwmwa_use_immersive_dark_mode = 20;
+    HRESULT hr = set_attr(hwnd, dwmwa_use_immersive_dark_mode, &enabled, sizeof(enabled));
+    if (FAILED(hr)) {
+        const DWORD dwmwa_use_immersive_dark_mode_old = 19;
+        set_attr(hwnd, dwmwa_use_immersive_dark_mode_old, &enabled, sizeof(enabled));
+    }
+
+    FreeLibrary(dwm);
+}
+
+static void on_win_realize_apply_dark_titlebar(GtkWidget *widget, gpointer user_data) {
+    (void)user_data;
+    apply_windows_dark_titlebar(widget);
+}
+
+static void attach_windows_dark_titlebar(GtkWidget *widget) {
+    if (!widget) return;
+    g_signal_connect(widget, "realize", G_CALLBACK(on_win_realize_apply_dark_titlebar), NULL);
+}
+#else
+static void apply_windows_dark_mode_preference(void) { }
+static void on_win_realize_apply_dark_titlebar(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    (void)user_data;
+}
+static void attach_windows_dark_titlebar(GtkWidget *widget) { (void)widget; }
+#endif
+
 
 /* Embedded WBASIC icon (PNG) linked into the executable (from icon.png). */
 extern const unsigned char _binary_icon_png_start[];
@@ -9290,6 +9371,7 @@ static void do_load(App *app, const char *arg) {
         "Load BASIC Program", GTK_WINDOW(app->win), GTK_FILE_CHOOSER_ACTION_OPEN,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL
     );
+    attach_windows_dark_titlebar(dlg);
     add_bas_file_filters(dlg);
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -9334,6 +9416,7 @@ static void do_save(App *app, const char *arg) {
         "Save BASIC Program", GTK_WINDOW(app->win), GTK_FILE_CHOOSER_ACTION_SAVE,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL
     );
+    attach_windows_dark_titlebar(dlg);
     add_bas_file_filters(dlg);
     if (app->current_path && *app->current_path) {
         /* If a program is already open, default to that filename */
@@ -9369,6 +9452,7 @@ static bool ui_save_as_prompt(App *app)
         "Save BASIC Program", GTK_WINDOW(app->win), GTK_FILE_CHOOSER_ACTION_SAVE,
         "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL
     );
+    attach_windows_dark_titlebar(dlg);
     add_bas_file_filters(dlg);
 
     if (app->current_path && *app->current_path) {
@@ -9428,6 +9512,7 @@ static bool ui_confirm_save_if_dirty(App *app)
         GTK_BUTTONS_NONE,
         "%s", msg
     );
+    attach_windows_dark_titlebar(dlg);
     gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dlg),
         "If you don’t save, your changes will be lost.");
 
@@ -9963,6 +10048,7 @@ static void show_preferences(App *app) {
         "_Close", GTK_RESPONSE_CLOSE,
     NULL
     );
+    attach_windows_dark_titlebar(dlg);
 
     GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
     GtkWidget *grid = gtk_grid_new();
@@ -10272,6 +10358,7 @@ const char *about_line3 = "February 1, 2026";
         GTK_RESPONSE_OK,
         NULL
     );
+    attach_windows_dark_titlebar(dlg);
 
     GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
     gtk_container_set_border_width(GTK_CONTAINER(content), 12);
@@ -10881,6 +10968,7 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
     if (app->splash_dlg) return G_SOURCE_REMOVE;
 
     GtkWidget *dlg = gtk_dialog_new();
+    attach_windows_dark_titlebar(dlg);
     gtk_window_set_title(GTK_WINDOW(dlg), "Wally's Basic");
     gtk_window_set_transient_for(GTK_WINDOW(dlg), GTK_WINDOW(app->win));
     gtk_window_set_modal(GTK_WINDOW(dlg), TRUE);
@@ -10921,6 +11009,7 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
 
 static void build_ui(App *app) {
     app->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    attach_windows_dark_titlebar(app->win);
     // Window title is driven by current filename
     update_window_title(app);
 
@@ -11278,6 +11367,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
         char **argvp = argv;
         gtk_init(&argc, &argvp);
     }
+    apply_windows_dark_mode_preference();
 
     App app;
     memset(&app, 0, sizeof(app));
@@ -11368,6 +11458,7 @@ static void on_menu_export_standalone(GtkMenuItem *mi, gpointer user_data) {
         "_Export", GTK_RESPONSE_ACCEPT,
     NULL
     );
+    attach_windows_dark_titlebar(dlg);
     GtkFileChooser *fc = GTK_FILE_CHOOSER(dlg);
     gtk_file_chooser_set_do_overwrite_confirmation(fc, TRUE);
     const char *default_name = "program";
@@ -11413,6 +11504,7 @@ static void on_menu_export_standalone(GtkMenuItem *mi, gpointer user_data) {
                                      "Export failed.\n\nSee build log: %s", log_disp);
         /* Keep the dialog clean; full details are in the build log file. */
     }
+    attach_windows_dark_titlebar(msg);
 
     /* Center the text block relative to the icon. */
     GtkWidget *msg_area = gtk_message_dialog_get_message_area(GTK_MESSAGE_DIALOG(msg));
@@ -11477,6 +11569,7 @@ int wbasic_main(int argc, char **argv) {
     }
 
     gtk_init(&argc, &argv);
+    apply_windows_dark_mode_preference();
 
     const char *startup_file = NULL;
     int autorun = 0;

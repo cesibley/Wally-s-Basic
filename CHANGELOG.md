@@ -1,6 +1,7 @@
 # CHANGELOG
 
 ## Patches
+- Fixed issues with Windows exe not supporting dark mode
 - Fixed non visible cursor in Windows exe
 
 ## [V1.06] – Windows Executable, Embedded Icon, SPEED cleanup
