@@ -2355,6 +2355,8 @@ static void apply_theme(App *app) {
     g_string_append(css, "textview#wbasic_editor, textview#wbasic_editor text {");
     if (fg) g_string_append_printf(css, " color: %s;", fg);
     if (bg) g_string_append_printf(css, " background-color: %s;", bg);
+    if (fg) g_string_append_printf(css, " caret-color: %s;", fg);
+    else g_string_append(css, " caret-color: currentColor;");
     if (fam_dup && *fam_dup) {
         g_string_append_printf(css, " font-family: \"%s\";", fam_dup);
         if (font_px > 0) g_string_append_printf(css, " font-size: %dpx;", font_px);

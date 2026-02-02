@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## Patches
+- Fixed non visible cursor in Windows exe
+
 ## [V1.06] – Windows Executable, Embedded Icon, SPEED cleanup
 - Embedded Executable Icon
   - icon.png is now embedded into the executable at link time (via ld -r -b binary wbasic_icon_png.o).
