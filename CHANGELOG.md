@@ -1,18 +1,23 @@
 # CHANGELOG
 
-## Updates
+## [V1.06] – Windows Executable, Embedded Icon, SPEED cleanup
+- Embedded Executable Icon
+  - icon.png is now embedded into the executable at link time (via ld -r -b binary wbasic_icon_png.o).
+  - Eliminated wbasic_icon_png.inc.
+  - Makefile now auto-generates wbasic_icon_png.o and links it into both GTK and headless builds.
+  - Added an objcopy step to add the note.GNU-stack section (silences the linker warning).
 
-- **Windows/MSYS2 portability improvements**
+- Windows/MSYS2 portability improvements**
   - Updated code base to support Windows build and execution
   - Added MSYS2/MinGW build and runtime guidance, including PATH setup tips and drive navigation.
   - Added a Windows batch helper to set MSYS2 MinGW PATH entries for a Command Prompt session.
-  - Improved Win32 compatibility in headless/export builds (Sleep delay path, portable case-insensitive search, stdint include, and localtime_s usage).
+  - Improved Win32 compatibility in headless/export builds (Sleep delay path, stdint include.
   - Guarded POSIX-only headers and headless TTY handling to prevent Windows build errors.
 
-- **SPEED command range clarified and tightened**
+- SPEED command range clarified and tightened
   - SPEED is a WBASIC-specific command.
-  - Valid range is now **1 (slowest) to 100 (fastest)**.
-  - Values outside this range are **clamped**, not rejected:
+  - Valid range is now 1 (slowest) to 100 (fastest).
+  - Values outside this range are clamped, not rejected:
     - Values < 1 are treated as SPEED 1.
     - Values > 100 are treated as SPEED 100.
   - Documentation updated in the reference manual to reflect this behavior.

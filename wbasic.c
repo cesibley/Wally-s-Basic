@@ -28,12 +28,12 @@
 #else
 #define WB_UNUSED
 #endif
-#define WBASIC_VERSION_MAJOR 0
-#define WBASIC_VERSION_MINOR 33
+#define WBASIC_VERSION_MAJOR 1
+#define WBASIC_VERSION_MINOR 6
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "0.34"
-#define WBASIC_BASELINE_DATE "2026-01-19"
-#define WBASIC_BASELINE_REV "2026-01-19 rev41"
+#define WBASIC_VERSION_STR "1.06"
+#define WBASIC_BASELINE_DATE "2026-02-01"
+#define WBASIC_BASELINE_REV "2026-02-01 v1.06"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -205,13 +205,17 @@ static double wbasic_compute_print_delay_ms_f_from_output_speed(double output_sp
 #include <gtk/gtk.h>
 
 
-/* Embedded WBASIC icon (PNG) for About / window icon (generated from 256x256 icon asset) */
-#include "wbasic_icon_png.inc"
+/* Embedded WBASIC icon (PNG) linked into the executable (from icon.png). */
+extern const unsigned char _binary_icon_png_start[];
+extern const unsigned char _binary_icon_png_end[];
+extern const unsigned int  _binary_icon_png_size;
 
+
+/* Embedded WBASIC icon (PNG) for About / window icon (linked from icon.png) */
 #ifndef WBASIC_NO_UI
 /* Load embedded PNG icon into a GdkPixbuf without deprecated APIs. */
 static GdkPixbuf *ui_load_wbasic_icon_pixbuf(void) {
-    GBytes *bytes = g_bytes_new_static(wbasic_icon_png, (gsize)wbasic_icon_png_len);
+    GBytes *bytes = g_bytes_new_static(_binary_icon_png_start, (gsize)(_binary_icon_png_end - _binary_icon_png_start));
     GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
     GError *err = NULL;
     GdkPixbuf *pix = gdk_pixbuf_new_from_stream(stream, NULL, &err);
@@ -10253,9 +10257,9 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
     (void)mi;
     App *app = (App*)user_data;
 
-/* About text (V1.0) */
-const char *about_line2 = "Version 1.0";
-const char *about_line3 = "January 29, 2026";
+/* About text (V1.06) */
+const char *about_line2 = "Version " WBASIC_VERSION_STR;
+const char *about_line3 = "February 1, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(

@@ -5,7 +5,7 @@ faithful classic BASIC behavior and a clean, portable C codebase.  Currently tex
 only.  Graphic commands are in planning.  
 
 ## Version
-**1.05** — January 30, 2026
+**1.06** — February 1, 2026
 
 ## Features
 - GW-BASIC–style syntax and semantics
@@ -26,13 +26,12 @@ only.  Graphic commands are in planning.
 ## Building
 GTK build:
 ```sh
-clear && gcc wbasic.c -o wbasic $(pkg-config --cflags --libs gtk+-3.0) -lm
+make gtk
 ```
 
 Headless build (requires GLib):
 ```sh
-clear && gcc -DWBASIC_NO_UI wbasic.c -o wbasic \
-  $(pkg-config --cflags --libs glib-2.0) -lm
+make cli
 ```
 
 ## Windows (MSYS2)
