@@ -2,9 +2,7 @@
 
 WBASIC is a GW-BASIC–style interpreter with a GTK3 user interface, focused on
 faithful classic BASIC behavior and a clean, portable C codebase.  Currently text
-only.  Graphic commands are in planning.
-
-Linux is the primary target, but Windows exe can be compiled and run.  See Readme.md for details.  
+only.  Graphic commands are in planning.  
 
 ## Version
 **1.06** — February 1, 2026
