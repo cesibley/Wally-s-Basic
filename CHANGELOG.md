@@ -1,6 +1,8 @@
 # CHANGELOG
 
 ## Patches
+- Restored the cli alias target to build the headless binary and marked it phony to match README 
+  expectations.
 - Update existing GTK color tags so preference-based default colors are refreshed when a program 
   runs, ensuring output uses current preference colors.
 - Removed the obsolete export speed checkbox from the Preferences dialog and tightened the layout

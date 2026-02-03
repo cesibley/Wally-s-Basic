@@ -10,7 +10,7 @@ SRC := wbasic.c
 ICON_PNG := icon.png
 ICON_OBJ := wbasic_icon_png.o
 
-.PHONY: all gtk headless clean fresh
+.PHONY: all gtk headless cli clean fresh
 
 all: gtk
 
@@ -26,6 +26,7 @@ gtk: wbasic
 wbasic: $(SRC) $(ICON_OBJ)
 	clear && $(CC) $(CFLAGS) $(SRC) $(ICON_OBJ) -o $@ $(PKG_GTK) $(LDLIBS)
 headless: wbasic_cli
+cli: headless
 wbasic_cli: $(SRC) $(ICON_OBJ)
 	clear && $(CC) $(CFLAGS) -DWBASIC_NO_UI $(SRC) $(ICON_OBJ) -o $@ $(PKG_GLIB) $(LDLIBS)
 fresh:
