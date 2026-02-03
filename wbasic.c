@@ -1716,7 +1716,7 @@ static void scrollback_ensure(App *app) {
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
-static void scrollback_push_row(App *app, const char *row, const unsigned char *fg, const unsigned char *bg, int cols) {
+static WB_UNUSED void scrollback_push_row(App *app, const char *row, const unsigned char *fg, const unsigned char *bg, int cols) {
     if (!app || !row || cols <= 0) return;
 #ifndef WBASIC_NO_UI
     scrollback_ensure(app);
@@ -1926,7 +1926,7 @@ static void screen_write(App *app, const char *s) {
 
 // Render the screen buffer into the GTK output TextView.
 
-static const char *vga16_hex[16] = {
+static WB_UNUSED const char *vga16_hex[16] = {
     "#000000", "#0000AA", "#00AA00", "#00AAAA",
     "#AA0000", "#AA00AA", "#AA5500", "#AAAAAA",
     "#555555", "#5555FF", "#55FF55", "#55FFFF",
@@ -1936,7 +1936,7 @@ static const char *vga16_hex[16] = {
 
 #ifndef WBASIC_NO_UI
 
-static void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
+static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
     if (!app || !app->output_buf) { tagname_out[0] = 0; return; }
 
     // 0-15 = GW-BASIC palette index; 16 = use Preferences exact colors
@@ -2003,7 +2003,7 @@ static void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
 #endif /* !WBASIC_NO_UI */
 
 #ifdef WBASIC_NO_UI
-static void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
+static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
     (void)app; (void)fg; (void)bg;
     if (tagname_out) tagname_out[0] = 0;
 }
@@ -2399,12 +2399,12 @@ static void apply_font_css(App *app)
 #endif /* !WBASIC_NO_UI */
 
 #ifdef WBASIC_NO_UI
-static void apply_font_css(App *app) { (void)app; }
+static WB_UNUSED void apply_font_css(App *app) { (void)app; }
 #endif
 
 #ifndef WBASIC_NO_UI
 
-static void apply_theme(App *app) {
+static WB_UNUSED void apply_theme(App *app) {
     if (!app) return;
 
     if (!app->css_provider) {
@@ -2494,11 +2494,11 @@ static char *prefs_get_path(void) {
 #endif /* !WBASIC_NO_UI */
 
 #ifdef WBASIC_NO_UI
-static void apply_theme(App *app) { (void)app; }
+static WB_UNUSED void apply_theme(App *app) { (void)app; }
 #endif
 
 
-static void prefs_save(App *app) {
+static WB_UNUSED void prefs_save(App *app) {
 #ifndef WBASIC_NO_UI
     if (!app) return;
     GKeyFile *kf = g_key_file_new();
@@ -2569,7 +2569,7 @@ static void prefs_save(App *app) {
 #endif
 }
 
-static void prefs_load(App *app) {
+static WB_UNUSED void prefs_load(App *app) {
 #ifndef WBASIC_NO_UI
     if (!app) return;
 
@@ -9234,14 +9234,14 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
     return true;
 }
 
-static void do_stop(App *app) {
+static WB_UNUSED void do_stop(App *app) {
     if (!app) return;
     app->pause_flag = false;
     app->stop_flag = true;
     set_run_state(app, RUN_STOPPED);
 }
 
-static void do_pause_toggle(App *app) {
+static WB_UNUSED void do_pause_toggle(App *app) {
     if (!app) return;
     // Only meaningful while executing or waiting for INPUT.
     if (app->run_state == RUN_IDLE || app->run_state == RUN_STOPPED) return;
@@ -9259,7 +9259,7 @@ static void do_pause_toggle(App *app) {
 
 /* ===================== Immediate mode ===================== */
 
-static bool parse_quoted_filename(const char *s, char **out) {
+static WB_UNUSED bool parse_quoted_filename(const char *s, char **out) {
     Parser p = { s };
     char *v = NULL;
     if (!parse_string_literal(&p, &v)) return false;
@@ -9312,7 +9312,7 @@ static void do_list(App *app) {
 }
 
 // Ensure a filename ends with .bas (case-insensitive). Returns newly-allocated string (g_free when done).
-static char *ensure_bas_suffix(const char *fn) {
+static WB_UNUSED char *ensure_bas_suffix(const char *fn) {
     if (!fn) return NULL;
     size_t n = strlen(fn);
     if (n >= 4 && g_ascii_strcasecmp(fn + (n - 4), ".bas") == 0) {
@@ -9495,7 +9495,7 @@ static bool ui_save_as_prompt(App *app)
 static bool ui_save_as_prompt(App *app) { (void)app; return false; }
 #endif /* WBASIC_NO_UI */
 
-static bool ui_save_current_or_prompt(App *app)
+static WB_UNUSED bool ui_save_current_or_prompt(App *app)
 {
     if (!app) return false;
     if (app->current_path && *app->current_path) {
@@ -9550,7 +9550,7 @@ static bool ui_confirm_save_if_dirty(App *app)
 static bool ui_confirm_save_if_dirty(App *app) { (void)app; return true; }
 #endif /* WBASIC_NO_UI */
 
-static void request_quit(App *app)
+static WB_UNUSED void request_quit(App *app)
 {
     if (!app) return;
     if (!ui_confirm_save_if_dirty(app)) return;
@@ -10123,7 +10123,7 @@ static void on_menu_prefs(GtkMenuItem *mi, gpointer user_data) { (void)mi; show_
 typedef enum { EDIT_CUT=1, EDIT_COPY=2, EDIT_PASTE=3 } EditAction;
 
 #ifndef WBASIC_NO_UI
-static void do_edit_clipboard(App *app, EditAction act)
+static WB_UNUSED void do_edit_clipboard(App *app, EditAction act)
 {
     if (!app || !app->win) return;
 
@@ -10157,12 +10157,12 @@ static void do_edit_clipboard(App *app, EditAction act)
     }
 }
 #else
-static void do_edit_clipboard(App *app, EditAction act) { (void)app; (void)act; }
+static WB_UNUSED void do_edit_clipboard(App *app, EditAction act) { (void)app; (void)act; }
 #endif /* WBASIC_NO_UI */
 
 
 #ifndef WBASIC_NO_UI
-static void do_edit_select_all(App *app)
+static WB_UNUSED void do_edit_select_all(App *app)
 {
     if (!app || !app->win) return;
 
@@ -10182,7 +10182,7 @@ static void do_edit_select_all(App *app)
     }
 }
 #else
-static void do_edit_select_all(App *app) { (void)app; }
+static WB_UNUSED void do_edit_select_all(App *app) { (void)app; }
 #endif /* WBASIC_NO_UI */
 
 
@@ -10225,7 +10225,7 @@ static UndoStack *undo_stack_new_for_buffer(GtkTextBuffer *buf)
     return u;
 }
 #endif /* !WBASIC_NO_UI */
-static void undo_stack_free(UndoStack *u)
+static WB_UNUSED void undo_stack_free(UndoStack *u)
 {
     if (!u) return;
     if (u->states) g_ptr_array_free(u->states, TRUE);
@@ -10269,8 +10269,8 @@ static void on_editor_buffer_changed(GtkTextBuffer *buf, gpointer user_data)
 }
 #endif /* !WBASIC_NO_UI */
 
-static bool undo_stack_can_undo(UndoStack *u) { return u && u->states && u->index > 0; }
-static bool undo_stack_can_redo(UndoStack *u) { return u && u->states && u->index < (int)u->states->len - 1; }
+static WB_UNUSED bool undo_stack_can_undo(UndoStack *u) { return u && u->states && u->index > 0; }
+static WB_UNUSED bool undo_stack_can_redo(UndoStack *u) { return u && u->states && u->index < (int)u->states->len - 1; }
 
 #ifndef WBASIC_NO_UI
 static void undo_stack_apply_index(UndoStack *u, GtkTextBuffer *buf, int new_index)
@@ -10285,7 +10285,7 @@ static void undo_stack_apply_index(UndoStack *u, GtkTextBuffer *buf, int new_ind
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
-static void do_edit_undo_redo(App *app, bool is_redo)
+static WB_UNUSED void do_edit_undo_redo(App *app, bool is_redo)
 {
     if (!app || !app->win) return;
 
@@ -10307,7 +10307,7 @@ static void do_edit_undo_redo(App *app, bool is_redo)
     }
 }
 #else
-static void do_edit_undo_redo(App *app, bool is_redo) { (void)app; (void)is_redo; }
+static WB_UNUSED void do_edit_undo_redo(App *app, bool is_redo) { (void)app; (void)is_redo; }
 #endif /* WBASIC_NO_UI */
 
 
@@ -10879,7 +10879,7 @@ static void set_current_path(App *app, const char *path_or_null)
     update_window_title(app);
 }
 #else
-static void set_current_path(App *app, const char *path_or_null) { if (!app) return; if (app->current_path) { free(app->current_path); app->current_path = NULL; } if (path_or_null && *path_or_null) app->current_path = xstrdup(path_or_null); }
+static WB_UNUSED void set_current_path(App *app, const char *path_or_null) { if (!app) return; if (app->current_path) { free(app->current_path); app->current_path = NULL; } if (path_or_null && *path_or_null) app->current_path = xstrdup(path_or_null); }
 #endif /* WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
@@ -11141,7 +11141,7 @@ static void free_key(gpointer data);
 static void free_val(gpointer data);
 
 #ifndef WBASIC_NO_UI
-static char *get_editor_text_dup(App *app) {
+static WB_UNUSED char *get_editor_text_dup(App *app) {
     if (!app || !app->editor_buf) return NULL;
     GtkTextIter a, b;
     gtk_text_buffer_get_start_iter(app->editor_buf, &a);
@@ -11149,7 +11149,7 @@ static char *get_editor_text_dup(App *app) {
     return gtk_text_buffer_get_text(app->editor_buf, &a, &b, FALSE); /* g_free */
 }
 #else
-static char *get_editor_text_dup(App *app) { (void)app; return NULL; }
+static WB_UNUSED char *get_editor_text_dup(App *app) { (void)app; return NULL; }
 #endif /* WBASIC_NO_UI */
 
 /* deleted unused static function: c_emit_escaped */
@@ -11168,7 +11168,7 @@ static void c_emit_escaped_len(FILE *fp, const char *s, size_t n) {
     }
 }
 
-static int export_standalone_from_text(const char *bas_text, const char *out_exe, int embed_speed_0_100, bool embed_include_speed, char **out_buildlog) {
+static WB_UNUSED int export_standalone_from_text(const char *bas_text, const char *out_exe, int embed_speed_0_100, bool embed_include_speed, char **out_buildlog) {
     if (out_buildlog) *out_buildlog = NULL;
     if (!bas_text || !out_exe) return 1;
 
@@ -11751,7 +11751,7 @@ static gboolean on_key_macro_idle(gpointer user_data) {
 
 
 
-static void queue_key_macro(App *app, const char *macro) {
+static WB_UNUSED void queue_key_macro(App *app, const char *macro) {
     if (!macro || !*macro) return;
 
     /* Replace any pending macro with the latest. */
