@@ -278,10 +278,6 @@ static void attach_windows_dark_titlebar(GtkWidget *widget) {
 }
 #else
 static void apply_windows_dark_mode_preference(void) { }
-static void on_win_realize_apply_dark_titlebar(GtkWidget *widget, gpointer user_data) {
-    (void)widget;
-    (void)user_data;
-}
 static void attach_windows_dark_titlebar(GtkWidget *widget) { (void)widget; }
 #endif
 
