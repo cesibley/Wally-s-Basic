@@ -1827,7 +1827,7 @@ static WB_UNUSED void scrollback_push_row(App *app, const char *row, const unsig
 #endif
 }
 #else
-static void scrollback_push_row(App *app, const char *row, const unsigned char *fg, const unsigned char *bg, int cols) {
+static void WB_UNUSED scrollback_push_row(App *app, const char *row, const unsigned char *fg, const unsigned char *bg, int cols) {
     (void)app; (void)row; (void)fg; (void)bg; (void)cols;
 }
 #endif /* WBASIC_NO_UI */

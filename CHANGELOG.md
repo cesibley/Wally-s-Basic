@@ -1,6 +1,7 @@
 # CHANGELOG
 
 ## Patches
+- Changes to eliminate warning during compile. GTK and CLI now compile cleanly.
 - Restored the cli alias target to build the headless binary and marked it phony to match README 
   expectations.
 - Update existing GTK color tags so preference-based default colors are refreshed when a program 
