@@ -29,11 +29,11 @@
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 6
+#define WBASIC_VERSION_MINOR 7
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.06"
+#define WBASIC_VERSION_STR "1.07"
 #define WBASIC_BASELINE_DATE "2026-02-01"
-#define WBASIC_BASELINE_REV "2026-02-01 v1.06"
+#define WBASIC_BASELINE_REV "2026-02-01 v1.07"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -10333,9 +10333,9 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
     (void)mi;
     App *app = (App*)user_data;
 
-/* About text (V1.06) */
-const char *about_line2 = "Version " WBASIC_VERSION_STR;
-const char *about_line3 = "February 1, 2026";
+/* About text (V1.07) */
+const char *about_line2 = "Version V" WBASIC_VERSION_STR;
+const char *about_line3 = "February 3, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(

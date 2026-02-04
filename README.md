@@ -7,7 +7,7 @@ only.  Graphic commands are in planning.
 The project is primarily for Linux and requires GTK and Glib.  It does compile and run under Windows with MSYS2, but it is not as filly tested under Windows.
 
 ## Version
-**1.06** — February 1, 2026
+**1.07** — February 3, 2026
 
 ## Features
 - GW-BASIC–style syntax and semantics
