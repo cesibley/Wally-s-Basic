@@ -45,7 +45,7 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ```
 
 ## Demos
-See the `demo/` directory for example BASIC programs, including a full V1.0 smoke test.
+See the `demo/` directory for example BASIC programs
 
 ## License
 MIT License
