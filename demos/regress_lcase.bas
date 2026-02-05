@@ -1,0 +1,3 @@
+10 A$ = "ABC"
+20 B$ = LCASE$(A$)
+30 PRINT B$

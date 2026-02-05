@@ -29,9 +29,9 @@
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 10
+#define WBASIC_VERSION_MINOR 11
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.10"
+#define WBASIC_VERSION_STR "1.11"
 #define WBASIC_BASELINE_DATE "2026-02-01"
 #define WBASIC_BASELINE_REV "2026-02-01 v1.07"
 #define WBASIC_SOURCE_FILE __FILE__
@@ -4499,6 +4499,46 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
 
 
 
+
+// Built-in: UCASE$(s$) / LCASE$(s$) — ASCII case conversion (GW-BASIC compatible)
+    {
+        const char *save2 = p->s;
+
+        bool to_upper = false;
+        bool to_lower = false;
+
+        if (consume_word_ci(p, "UCASE$")) to_upper = true;
+        else if (consume_word_ci(p, "LCASE$")) to_lower = true;
+
+        if (to_upper || to_lower) {
+            skip_ws(p);
+            if (!consume(p, '(')) { p->s = save2; return false; }
+
+            char *arg = NULL;
+            if (!parse_string_value(app, p, &arg)) { p->s = save2; return false; }
+
+            skip_ws(p);
+            if (!consume(p, ')')) { free(arg); runtime_error(app, 0, "Illegal function call"); return false; }
+
+            size_t n = arg ? strlen(arg) : 0;
+            char *buf = (char*)malloc(n + 1);
+            if (!buf) { free(arg); runtime_error(app, 0, "Out of memory"); return false; }
+
+            for (size_t k = 0; k < n; k++) {
+                unsigned char c = (unsigned char)arg[k];
+                if (to_upper) buf[k] = (char)((c >= 'a' && c <= 'z') ? (c - 'a' + 'A') : c);
+                else buf[k] = (char)((c >= 'A' && c <= 'Z') ? (c - 'A' + 'a') : c);
+            }
+            buf[n] = 0;
+
+            free(arg);
+            *out = buf;
+            return true;
+        }
+
+        p->s = save2;
+    }
+
     char *name = NULL;
     if (parse_identifier(p, &name)) {
         if (!ident_is_string_var(app, name) && strcasecmp(name, "TAB") && strcasecmp(name, "SPC")) { free(name); return false; }
@@ -8786,7 +8826,22 @@ if (starts_ci(s, "SEEK") && is_word_boundary(s[4])) {
         return ok;
     }
 
-    // LINE INPUT (file only): LINE INPUT #n, A$
+    
+    // LINE INPUT (keyboard): LINE INPUT A$
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (starts_ci(t, "INPUT") && is_word_boundary(t[5])) {
+            Parser p2 = { t + 5 };
+            skip_ws(&p2);
+            if (*p2.s != '#') {
+                bool ok = exec_input(app, &p2, current_line);
+                free(tmp);
+                return ok;
+            }
+        }
+    }
+// LINE INPUT (file only): LINE INPUT #n, A$
     if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
         char *t = s + 4;
         while (*t && isspace((unsigned char)*t)) t++;
@@ -11178,7 +11233,7 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "February 4, 2026";
+const char *about_line3 = "February 5, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
