@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## [V1.11] – UCASE$/LCASE$ (Phase 1)
+## [V1.11] – UCASE$/LCASE$ added, LINE INPUT fixed 
 
 - Fixed keyboard LINE INPUT so LINE INPUT A$ correctly reads from the console instead of being 
   misparsed as file input
