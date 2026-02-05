@@ -32,8 +32,8 @@
 #define WBASIC_VERSION_MINOR 11
 #define WBASIC_VERSION_PATCH_STR ""
 #define WBASIC_VERSION_STR "1.11"
-#define WBASIC_BASELINE_DATE "2026-02-01"
-#define WBASIC_BASELINE_REV "2026-02-01 v1.07"
+#define WBASIC_BASELINE_DATE "2026-02-05"
+#define WBASIC_BASELINE_REV "2026-02-05 v1.11"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -4198,10 +4198,39 @@ static bool parse_cond_or(App *app, Parser *p, double *out);
 
 static bool parse_cond_atom(App *app, Parser *p, double *out) {
     skip_ws(p);
-    if (consume(p, '(')) {
-        if (!parse_cond_or(app, p, out)) return false;
-        if (!consume(p, ')')) return false;
-        return true;
+    /*
+     * Parentheses at the start of a condition are ambiguous in GW-BASIC:
+     *   - IF (A=1 OR B=2) AND C=3 THEN   -> grouping for boolean logic
+     *   - IF (A*2)+B=20 THEN             -> arithmetic subexpression
+     *
+     * Our condition grammar supports both by only treating a leading '(' as
+     * boolean-grouping when the matching ')' is followed by a boolean boundary
+     * (end/THEN/AND/OR/)/:, etc). If the ')' is immediately followed by an
+     * arithmetic or relational operator (+ - * / ^ = < >), we fall back to numeric
+     * expression parsing so constructs like (A*2)+B work correctly.
+     */
+    {
+        const char *save0 = p->s;
+        Parser t = { p->s };
+        skip_ws(&t);
+        if (*t.s == '(') {
+            if (consume(p, '(')) {
+                if (parse_cond_or(app, p, out) && consume(p, ')')) {
+                    Parser la = { p->s };
+                    skip_ws(&la);
+                    char c = *la.s;
+                    if (c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='=' || c=='<' || c=='>') {
+                        /* Looks like arithmetic/relational continuation; not a boolean-grouped atom. */
+                        p->s = save0;
+                    } else {
+                        return true;
+                    }
+                } else {
+                    /* Grouping attempt failed; rewind and try other parses. */
+                    p->s = save0;
+                }
+            }
+        }
     }
 
     // String relational: <str> [relop <str>]
@@ -12819,5 +12848,4 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
-
 

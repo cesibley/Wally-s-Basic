@@ -5,6 +5,7 @@
 - Fixed keyboard LINE INPUT so LINE INPUT A$ correctly reads from the console instead of being 
   misparsed as file input
 - Implemented UCASE$ and LCASE$ as core string functions (GW-BASIC compatible).
+- Fixed single-line IF condition parsing when the condition begins with parentheses (e.g., IF (A*2)+B=20 THEN ...).
 
 
 ## [V1.10] – WRITE / INPUT Round-Trip & CSV Semantics
