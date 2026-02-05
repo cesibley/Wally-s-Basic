@@ -1,7 +1,25 @@
 # CHANGELOG
 
-## Patches
+## [V1.10] – WRITE / INPUT Round-Trip & CSV Semantics
+- Binary I/O Phase 4: Implemented `FIELD #n, ...`, `LSET`, and `RSET` record buffer mappings 
+  for RANDOM files.
+- Binary I/O Phase 3: Implemented `GET #n, rec` and `PUT #n, rec` for RANDOM files (record 
+  I/O using internal LEN-sized buffer).
+- Binary I/O Phase 2: Added `LOF(n)`, `SEEK(n)`, and `SEEK #n, pos` (RANDOM uses record-based 
+  seek; others use 1-based byte positions).
+- Binary I/O Phase 1: Implemented parsing + bookkeeping for `OPEN ... FOR RANDOM AS #n 
+  LEN=<reclen>` (opens file read/write; creates if missing).
+- Planning: Defined Phase 0 scope/rules for upcoming GW-BASIC compatible binary/random-access 
+  file I/O.
+- Added `WRITE` / `WRITE #n` for machine-readable output (CSV-style) designed to round-trip 
+  with `INPUT` / `INPUT #`.
+- INPUT` / `INPUT #` now accept doubled quotes (`""`) inside quoted fields (to match 
+  GW-BASIC `WRITE` semantics).
+- Added demo coverage for WRITE/INPUT edge cases: empty string, embedded commas in strings, 
+  leading/trailing spaces, and exponent/scientific numeric formats.
+
 - Fixed Block IF boolean condition parsing
+
 
 ## [V1.07]
 - Changes to eliminate warning during compile. GTK and CLI now compile cleanly.

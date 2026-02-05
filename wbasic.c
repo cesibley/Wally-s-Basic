@@ -29,9 +29,9 @@
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 7
+#define WBASIC_VERSION_MINOR 10
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.07"
+#define WBASIC_VERSION_STR "1.10"
 #define WBASIC_BASELINE_DATE "2026-02-01"
 #define WBASIC_BASELINE_REV "2026-02-01 v1.07"
 #define WBASIC_SOURCE_FILE __FILE__
@@ -509,6 +509,14 @@ typedef struct App App;
 static void *xmalloc(size_t n);
 static void *xrealloc(void *ptr, size_t n);
 static char *xstrdup(const char *s);
+static char *inputdollar_read_keyboard(App *app, int n, int current_line);
+static char *pack_i16(int v);
+static char *pack_f32(float f);
+static char *pack_f64(double d);
+static int   unpack_i16(const char *s);
+static float unpack_f32(const char *s);
+static double unpack_f64(const char *s);
+
 
 
 
@@ -674,7 +682,15 @@ static WB_UNUSED void prog_next_stmt(App *app, int li, int si, int *out_li, int 
 static void prog_goto_stmt(App *app, int li, int si, int *out_li, int *out_si);
 
 
+typedef struct {
+    char *name;   /* uppercase var name (e.g., "A$") */
+    int offset;   /* byte offset into record_buf */
+    int len;      /* slice length in bytes */
+} FieldMap;
+
 typedef enum {
+    FILE_MODE_RANDOM,
+
     V_NUM = 0,
     V_STR = 1,
 } VarKind;
@@ -698,13 +714,20 @@ typedef enum {
     BF_INPUT  = 1,
     BF_OUTPUT = 2,
     BF_APPEND = 3,
+    BF_RANDOM = 4,
 } BasicFileMode;
 
 typedef struct {
     FILE *fp;
+    int record_len; /* RANDOM file record length */
+    unsigned char *record_buf; /* RANDOM record buffer (LEN bytes) */
+    FieldMap *fields;          /* FIELD mappings (RANDOM only) */
+    int field_count;
+    int field_cap;
     BasicFileMode mode;
     bool eof_latched; /* once EOF is observed for INPUT, it stays true until CLOSE/OPEN */
 } BasicFile;
+static BasicFile *file_get(App *app, int n);
 
 typedef struct {
     VarKind kind;
@@ -3442,6 +3465,7 @@ static bool var_redim_array(Var *v, bool is_string, int ndims, int base, const i
 }
 
 
+static void runtime_error(App *app, int line_no, const char *msg);
 static bool parse_expr(App *app, Parser *p, double *out);
 
 static double func_eof(App *app, int n);
@@ -3692,7 +3716,7 @@ if (!strcasecmp(name, "ERL")) {
                 !strcasecmp(name, "ATN") || !strcasecmp(name, "SQR") || !strcasecmp(name, "LOG") ||
                 !strcasecmp(name, "EXP") || !strcasecmp(name, "ABS") || !strcasecmp(name, "INT") ||
                 !strcasecmp(name, "SGN") || !strcasecmp(name, "FIX") || !strcasecmp(name, "CINT") ||
-                !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") ||
+                !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") || !strcasecmp(name, "LOF") || !strcasecmp(name, "SEEK") || !strcasecmp(name, "CVI") || !strcasecmp(name, "CVS") || !strcasecmp(name, "CVD") ||
                 !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND")) {
 
                 consume(p, '(');
@@ -3707,7 +3731,85 @@ if (!strcasecmp(name, "ERL")) {
                     free(name);
                     return true;
                 }
-                /* PI() is a zero-argument constant; PI without () is a normal variable. */
+                
+                /* LOF(n) returns file length in bytes. */
+                if (!strcasecmp(name, "LOF")) {
+                    double hv2 = 0.0;
+                    if (!parse_expr(app, p, &hv2)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    int h2 = (int)llround(hv2);
+                    if (h2 <= 0 || h2 >= BASIC_MAX_FILES || !app->files[h2].fp) {
+                        free(name);
+                        runtime_error(app, 0, "Invalid file handle");
+                        return false;
+                    }
+                    long cur = ftell(app->files[h2].fp);
+                    fseek(app->files[h2].fp, 0, SEEK_END);
+                    long end = ftell(app->files[h2].fp);
+                    fseek(app->files[h2].fp, cur, SEEK_SET);
+                    *out = (double)end;
+                    free(name);
+                    return true;
+                }
+
+                /* SEEK(n) returns current position: record number for RANDOM, else 1-based byte position. */
+                if (!strcasecmp(name, "SEEK")) {
+                    double hv2 = 0.0;
+                    if (!parse_expr(app, p, &hv2)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    int h2 = (int)llround(hv2);
+                    if (h2 <= 0 || h2 >= BASIC_MAX_FILES || !app->files[h2].fp) {
+                        free(name);
+                        runtime_error(app, 0, "Invalid file handle");
+                        return false;
+                    }
+                    long cur = ftell(app->files[h2].fp);
+                    BasicFile *bf = &app->files[h2];
+                    if (bf->mode == BF_RANDOM && bf->record_len > 0) *out = (double)(cur / bf->record_len + 1);
+                    else *out = (double)(cur + 1);
+                    free(name);
+                    return true;
+                }
+
+                /* CVI(s$): unpack 16-bit signed integer */
+if (!strcasecmp(name, "CVI")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = (double)unpack_i16(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* CVS(s$): unpack single-precision float */
+if (!strcasecmp(name, "CVS")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = (double)unpack_f32(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* CVD(s$): unpack double */
+if (!strcasecmp(name, "CVD")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = unpack_f64(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* PI() is a zero-argument constant; PI without () is a normal variable. */
                 if (!strcasecmp(name, "PI")) {
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
@@ -4322,7 +4424,53 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     char *lit = NULL;
     if (parse_string_literal(p, &lit)) { *out = lit; return true; }
     p->s = save;
-    // Built-in: INKEY$ (non-blocking). Returns "" if no key available, else a 1-char string.
+    
+// Built-in: INPUT$(n[,#h]) - reads N chars from keyboard or from an open file.
+{
+    const char *save2 = p->s;
+    if (consume_word_ci(p, "INPUT$")) {
+        skip_ws(p);
+        if (!consume(p, '(')) { p->s = save2; return false; }
+
+        double nv = 0.0;
+        if (!parse_expr(app, p, &nv)) { p->s = save2; return false; }
+        int n = (int)llround(nv);
+        if (n < 0) n = 0;
+
+        skip_ws(p);
+        if (consume(p, ',')) {
+            skip_ws(p);
+            if (!consume(p, '#')) { runtime_error(app, 0, "Bad file number"); return false; }
+            double hv = 0.0;
+            if (!parse_expr(app, p, &hv)) { runtime_error(app, 0, "Bad file number"); return false; }
+            int h = (int)llround(hv);
+
+            BasicFile *bf = file_get(app, h);
+            if (!bf || !bf->fp) { runtime_error(app, 0, "Bad file number"); return false; }
+
+            skip_ws(p);
+            if (!consume(p, ')')) { runtime_error(app, 0, "INPUT$ missing ')'"); return false; }
+
+            char *buf = (char*)malloc((size_t)n + 1);
+            if (!buf) { runtime_error(app, 0, "Out of memory"); return false; }
+            size_t got = fread(buf, 1, (size_t)n, bf->fp);
+            buf[got] = 0;
+            *out = buf;
+            return true;
+        }
+
+        skip_ws(p);
+        if (!consume(p, ')')) { runtime_error(app, 0, "INPUT$ missing ')'"); return false; }
+
+        char *s = inputdollar_read_keyboard(app, n, 0);
+        if (!s) return false;
+        *out = s;
+        return true;
+    }
+    p->s = save2;
+}
+
+// Built-in: INKEY$ (non-blocking). Returns "" if no key available, else a 1-char string.
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
@@ -4533,7 +4681,49 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
             free(name);
             return true;
         }
-        if (!strcasecmp(name, "STR$")) {
+                if (!strcasecmp(name, "MKI$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_i16((int)llround(v));
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+                if (!strcasecmp(name, "MKS$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_f32((float)v);
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+                if (!strcasecmp(name, "MKD$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_f64(v);
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+if (!strcasecmp(name, "STR$")) {
             skip_ws(p);
             if (!consume(p, '(')) { free(name); return false; }
             double dv = 0.0;
@@ -5284,13 +5474,156 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
 static bool exec_single_statement(App *app, const char *stmt, int current_line, int cur_li, int cur_si, int *line_idx, int *stmt_idx);
 
 
+
+
+
+/* ---- Phase 5: Binary packing helpers ----
+   NOTE: WBASIC strings are currently NUL-terminated C strings (not binary-length strings).
+   To make MKI$/MKS$/MKD$ and CVI/CVS/CVD usable without a full binary-string refactor, we store floats/doubles in
+   big-endian order to avoid leading NULs for common values, and CVS/CVD tolerate truncated
+   strings (missing tail bytes are treated as 0).
+*/
+static char *pack_i16(int v) {
+    char *s = (char*)malloc(3);
+    if (!s) return NULL;
+    s[0] = (char)(v & 0xFF);
+    s[1] = (char)((v >> 8) & 0xFF);
+    s[2] = 0;
+    return s;
+}
+static char *pack_f32(float f) {
+    char *s = (char*)malloc(5);
+    if (!s) return NULL;
+    union { float f; unsigned char b[4]; } u;
+    u.f = f;
+    // big-endian
+    s[0] = (char)u.b[3];
+    s[1] = (char)u.b[2];
+    s[2] = (char)u.b[1];
+    s[3] = (char)u.b[0];
+    s[4] = 0;
+    return s;
+}
+static char *pack_f64(double d) {
+    char *s = (char*)malloc(9);
+    if (!s) return NULL;
+    union { double d; unsigned char b[8]; } u;
+    u.d = d;
+    // big-endian
+    for (int i = 0; i < 8; i++) s[i] = (char)u.b[7 - i];
+    s[8] = 0;
+    return s;
+}
+static int unpack_i16(const char *s) {
+    if (!s) return 0;
+    unsigned char b0 = (unsigned char)s[0];
+    unsigned char b1 = (unsigned char)s[1];
+    short v = (short)(b0 | (b1 << 8));
+    return (int)v;
+}
+static float unpack_f32(const char *s) {
+    union { float f; unsigned char b[4]; } u;
+    for (int i = 0; i < 4; i++) u.b[i] = 0;
+    if (s) {
+        size_t n = strlen(s);
+        if (n > 4) n = 4;
+        // input big-endian -> place into u.b[3..0]
+        for (size_t i = 0; i < n; i++) u.b[3 - (int)i] = (unsigned char)s[i];
+    }
+    return u.f;
+}
+static double unpack_f64(const char *s) {
+    union { double d; unsigned char b[8]; } u;
+    for (int i = 0; i < 8; i++) u.b[i] = 0;
+    if (s) {
+        size_t n = strlen(s);
+        if (n > 8) n = 8;
+        // input big-endian -> place into u.b[7..0]
+        for (size_t i = 0; i < n; i++) u.b[7 - (int)i] = (unsigned char)s[i];
+    }
+    return u.d;
+}
+
+/* ---- RANDOM FIELD helpers (Phase 4) ---- */
+static void field_clear(BasicFile *bf) {
+    if (!bf) return;
+    if (bf->fields) {
+        for (int i = 0; i < bf->field_count; i++) {
+            free(bf->fields[i].name);
+        }
+        free(bf->fields);
+    }
+    bf->fields = NULL;
+    bf->field_count = 0;
+    bf->field_cap = 0;
+}
+
+static FieldMap *field_find(BasicFile *bf, const char *upper_name) {
+    if (!bf || !bf->fields) return NULL;
+    for (int i = 0; i < bf->field_count; i++) {
+        if (!strcmp(bf->fields[i].name, upper_name)) return &bf->fields[i];
+    }
+    return NULL;
+}
+
+static bool field_lookup(App *app, const char *upper_name, BasicFile **out_bf, FieldMap **out_fm) {
+    for (int i = 1; i < BASIC_MAX_FILES; i++) {
+        BasicFile *bf = &app->files[i];
+        if (!bf->fp) continue;
+        FieldMap *fm = field_find(bf, upper_name);
+        if (fm) {
+            *out_bf = bf;
+            *out_fm = fm;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void field_sync_vars(App *app, BasicFile *bf) {
+    if (!bf || !bf->fields || !bf->record_buf) return;
+    for (int i = 0; i < bf->field_count; i++) {
+        FieldMap *fm = &bf->fields[i];
+        Var *v = vars_get_or_create(app, fm->name);
+        if (!v) continue;
+        // Copy slice into scalar string (fixed-length, but stored as C string)
+        char *s = (char*)malloc((size_t)fm->len + 1);
+        if (!s) continue;
+        memcpy(s, bf->record_buf + fm->offset, (size_t)fm->len);
+        s[fm->len] = 0;
+        v->kind = V_STR;
+        free(v->str);
+        v->str = s;
+    }
+}
+
+static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool right_justify) {
+    // Pad with spaces and truncate. GW-BASIC style for LSET/RSET.
+    memset(bf->record_buf + fm->offset, ' ', (size_t)fm->len);
+    size_t sl = src ? strlen(src) : 0;
+    if (sl > (size_t)fm->len) sl = (size_t)fm->len;
+    if (right_justify) {
+        size_t start = (size_t)fm->len - sl;
+        memcpy(bf->record_buf + fm->offset + (int)start, src, sl);
+    } else {
+        memcpy(bf->record_buf + fm->offset, src, sl);
+    }
+}
+
 /* ---- File I/O helpers ---- */
 static void files_close_all(App *app);
 static BasicFile *file_get(App *app, int n);
 static bool exec_defint(App *app, Parser *p, int current_line);
 static bool exec_open(App *app, Parser *p, int current_line);
+static bool exec_field(App *app, Parser *p, int current_line);
+static bool exec_lset_rset(App *app, Parser *p, int current_line, bool right_justify);
+static bool exec_get(App *app, Parser *p, int current_line);
+static bool exec_put(App *app, Parser *p, int current_line);
+static bool exec_seek(App *app, Parser *p, int current_line);
 static bool exec_close(App *app, Parser *p, int current_line);
 static bool exec_print_file(App *app, Parser *p, int current_line);
+static bool exec_write(App *app, Parser *p, int current_line);
+static bool exec_write_file(App *app, Parser *p, int current_line);
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode);
 static bool exec_statement_chain_from(App *app, const char *text, int current_line,
                                      int base_line_idx, int base_stmt_idx,
@@ -5768,9 +6101,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     if (consume_word_ci(p, "INPUT")) mode = BF_INPUT;
     else if (consume_word_ci(p, "OUTPUT")) mode = BF_OUTPUT;
     else if (consume_word_ci(p, "APPEND")) mode = BF_APPEND;
+    else if (consume_word_ci(p, "RANDOM")) mode = BF_RANDOM;
     else {
         free(path);
-        runtime_error(app, current_line, "OPEN mode must be INPUT/OUTPUT/APPEND");
+        runtime_error(app, current_line, "OPEN mode must be INPUT/OUTPUT/APPEND/RANDOM");
         return false;
     }
 
@@ -5796,6 +6130,32 @@ static bool exec_open(App *app, Parser *p, int current_line) {
         return false;
     }
 
+    int rec_len = 0;
+    if (mode == BF_RANDOM) {
+        // GW-BASIC style: OPEN "file" FOR RANDOM AS #n LEN=<reclen>
+        skip_ws(p);
+        if (consume_word_ci(p, "LEN")) {
+            skip_ws(p);
+            if (!consume(p, '=')) {
+                free(path);
+                runtime_error(app, current_line, "OPEN RANDOM missing LEN=");
+                return false;
+            }
+            double lv = 0.0;
+            if (!parse_expr(app, p, &lv)) {
+                free(path);
+                runtime_error(app, current_line, "Bad LEN value");
+                return false;
+            }
+            rec_len = (int)llround(lv);
+        }
+        if (rec_len <= 0) {
+            free(path);
+            runtime_error(app, current_line, "OPEN RANDOM requires LEN=<record_length>");
+            return false;
+        }
+    }
+
     BasicFile *bf = file_get(app, h);
     // GW-BASIC: OPEN on an already-open file handle raises ERR 55 (File already open).
     if (bf && bf->fp) {
@@ -5804,7 +6164,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
         return false;
     }
 
-    const char *fmode = (mode == BF_INPUT) ? "r" : (mode == BF_OUTPUT) ? "w" : "a";
+    const char *fmode = (mode == BF_INPUT)  ? "r"  :
+                       (mode == BF_OUTPUT) ? "w"  :
+                       (mode == BF_APPEND) ? "a"  :
+                       /* BF_RANDOM */        "r+b";
 
     // Resolve relative paths against the directory of the currently loaded BASIC program.
     // This matches typical GW-BASIC expectations (SAVE/LOAD files live alongside the .BAS).
@@ -5822,6 +6185,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     }
 
     bf->fp = fopen(open_path, fmode);
+    if (!bf->fp && mode == BF_RANDOM) {
+        // Create if missing (read/write binary)
+        bf->fp = fopen(open_path, "w+b");
+    }
     g_free(open_path);
     if (!bf->fp) {
         free(path);
@@ -5830,11 +6197,229 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     }
 
     bf->mode = mode;
+    bf->record_len = (mode == BF_RANDOM) ? rec_len : 0;
+    if (mode == BF_RANDOM) {
+        field_clear(bf);
+        if (bf->record_buf) { free(bf->record_buf); bf->record_buf = NULL; }
+        bf->record_buf = (unsigned char*)calloc((size_t)rec_len, 1);
+        if (!bf->record_buf) { free(path); runtime_error(app, current_line, "Out of memory"); return false; }
+    } else {
+        if (bf->record_buf) { free(bf->record_buf); bf->record_buf = NULL; }
+        field_clear(bf);
+    }
     bf->eof_latched = false;
 
     free(path);
     return true;
 }
+
+// Phase 2: SEEK #n, pos
+// - For RANDOM files: pos is 1-based record number; seeks to (pos-1)*record_len
+// - For others: pos is 1-based byte position; seeks to (pos-1)
+static bool exec_seek(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "SEEK requires #n"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, 0, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "SEEK requires #n, pos"); return false; }
+
+    double pv = 0.0;
+    if (!parse_expr(app, p, &pv)) { runtime_error(app, current_line, "Bad SEEK position"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    long pos = 0;
+    if (bf->mode == BF_RANDOM) {
+        if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+        pos = (long)((pv - 1.0) * (double)bf->record_len);
+    } else {
+        pos = (long)pv - 1;
+    }
+    if (pos < 0) pos = 0;
+
+    if (fseek(bf->fp, pos, SEEK_SET) != 0) { runtime_error(app, current_line, "SEEK failed"); return false; }
+    bf->eof_latched = false;
+    field_sync_vars(app, bf);
+    return true;
+}
+
+// Phase 3: GET #n, rec  (RANDOM files)
+static bool exec_get(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "GET requires #n, rec"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET requires #n, rec"); return false; }
+
+    double rv = 0.0;
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "Bad record number"); return false; }
+    long rec = (long)llround(rv);
+    if (rec <= 0) { runtime_error(app, current_line, "Record number out of range"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "GET only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    long off = (rec - 1) * (long)bf->record_len;
+    if (fseek(bf->fp, off, SEEK_SET) != 0) { runtime_error(app, current_line, "GET seek failed"); return false; }
+
+    size_t got = fread(bf->record_buf, 1, (size_t)bf->record_len, bf->fp);
+    if (got < (size_t)bf->record_len) {
+        // Beyond EOF: fill remainder with NUL bytes (0x00) for now.
+        memset(bf->record_buf + got, 0, (size_t)bf->record_len - got);
+    }
+
+        bf->eof_latched = false;
+        field_sync_vars(app, bf);
+        return true;
+}
+
+
+// Phase 3: PUT #n, rec  (RANDOM files)
+static bool exec_put(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "PUT requires #n, rec"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT requires #n, rec"); return false; }
+
+    double rv = 0.0;
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "Bad record number"); return false; }
+    long rec = (long)llround(rv);
+    if (rec <= 0) { runtime_error(app, current_line, "Record number out of range"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "PUT only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        // No FIELD support yet (Phase 4). For Phase 3 we create an all-zero record buffer.
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    long off = (rec - 1) * (long)bf->record_len;
+    if (fseek(bf->fp, off, SEEK_SET) != 0) { runtime_error(app, current_line, "PUT seek failed"); return false; }
+
+    size_t wrote = fwrite(bf->record_buf, 1, (size_t)bf->record_len, bf->fp);
+    if (wrote != (size_t)bf->record_len) { runtime_error(app, current_line, "PUT write failed"); return false; }
+    fflush(bf->fp);
+
+    bf->eof_latched = false;
+    return true;
+}
+
+// Phase 4: FIELD #n, <len> AS <var$>, <len> AS <var$>, ...
+static bool exec_field(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "FIELD requires #n, ..."); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    BasicFile *bf = file_get(app, h);
+    if (!bf) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "FIELD only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "FIELD requires #n, ..."); return false; }
+
+    // Replace any existing mapping for this file handle
+    field_clear(bf);
+
+    int off = 0;
+    while (1) {
+        double lv = 0.0;
+        if (!parse_expr(app, p, &lv)) { runtime_error(app, current_line, "Bad FIELD length"); return false; }
+        int len = (int)llround(lv);
+        if (len <= 0) { runtime_error(app, current_line, "Bad FIELD length"); return false; }
+
+        skip_ws(p);
+        if (!consume_word_ci(p, "AS")) { runtime_error(app, current_line, "FIELD missing AS"); return false; }
+
+        char *vname = NULL;
+        if (!parse_identifier(p, &vname)) { runtime_error(app, current_line, "FIELD expected variable"); return false; }
+        if (!ident_is_string_var(app, vname)) { free(vname); runtime_error(app, current_line, "FIELD variable must be string"); return false; }
+
+        if (off + len > bf->record_len) { free(vname); runtime_error(app, current_line, "FIELD exceeds record LEN"); return false; }
+
+        if (bf->field_count >= bf->field_cap) {
+            int ncap = bf->field_cap ? bf->field_cap * 2 : 8;
+            FieldMap *nf = (FieldMap*)realloc(bf->fields, (size_t)ncap * sizeof(FieldMap));
+            if (!nf) { free(vname); runtime_error(app, current_line, "Out of memory"); return false; }
+            bf->fields = nf;
+            bf->field_cap = ncap;
+        }
+
+        bf->fields[bf->field_count].name = vname; // already upper
+        bf->fields[bf->field_count].offset = off;
+        bf->fields[bf->field_count].len = len;
+        bf->field_count++;
+
+        off += len;
+
+        skip_ws(p);
+        if (consume(p, ',')) continue;
+        break;
+    }
+
+    // Update string vars to reflect current record buffer
+    field_sync_vars(app, bf);
+    return true;
+}
+
+static bool exec_lset_rset(App *app, Parser *p, int current_line, bool right_justify) {
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) { runtime_error(app, current_line, "Expected variable"); return false; }
+    if (!ident_is_string_var(app, name)) { free(name); runtime_error(app, current_line, "LSET/RSET requires string variable"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, '=')) { free(name); runtime_error(app, current_line, "Expected '='"); return false; }
+
+    char *sv = NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); runtime_error_or_pending(app, current_line, "Bad string assignment"); return false; }
+
+    // If this variable is FIELD-mapped, write into the record buffer slice
+    BasicFile *bf = NULL;
+    FieldMap *fm = NULL;
+    if (field_lookup(app, name, &bf, &fm) && bf && fm && bf->record_buf) {
+        field_write_slice(bf, fm, sv ? sv : "", right_justify);
+        field_sync_vars(app, bf); // keep vars consistent with buffer
+        free(sv);
+        free(name);
+        return true;
+    }
+
+    // Not field-mapped: behave like normal string assignment
+    Var *v = vars_get_or_create(app, name);
+    v->kind = V_STR;
+    free(v->str);
+    v->str = sv; // take ownership
+    free(name);
+    return true;
+}
+
+
+
+
 
 static bool exec_close(App *app, Parser *p, int current_line) {
     skip_ws(p);
@@ -5939,6 +6524,165 @@ static bool exec_print_file(App *app, Parser *p, int current_line) {
     return true;
 }
 
+/* ---- WRITE / WRITE # ---- */
+
+typedef struct WriteSink {
+    App *app;      /* when to_file == false */
+    FILE *fp;      /* when to_file == true */
+    bool to_file;
+} WriteSink;
+
+static void write_sink_puts(WriteSink *ws, const char *s) {
+    if (!ws || !s) return;
+    if (ws->to_file) {
+        fputs(s, ws->fp);
+    } else {
+        out_append(ws->app, s);
+    }
+}
+
+static void write_sink_putc(WriteSink *ws, int c) {
+    if (!ws) return;
+    if (ws->to_file) {
+        fputc(c, ws->fp);
+    } else {
+        char buf[2];
+        buf[0] = (char)c;
+        buf[1] = 0;
+        out_append(ws->app, buf);
+    }
+}
+
+static void write_emit_quoted_string(WriteSink *ws, const char *s) {
+    /* GW-BASIC WRITE: strings always quoted; internal quotes doubled. */
+    write_sink_putc(ws, '"');
+    const char *p = (s ? s : "");
+    while (*p) {
+        if (*p == '"') {
+            write_sink_putc(ws, '"');
+            write_sink_putc(ws, '"');
+        } else {
+            write_sink_putc(ws, (unsigned char)*p);
+        }
+        p++;
+    }
+    write_sink_putc(ws, '"');
+}
+
+static bool exec_write_common(App *app, WriteSink *ws, Parser *p, int current_line) {
+    (void)app;
+    (void)current_line;
+    if (!p || !ws) return false;
+
+    /* WRITE with no args => newline */
+    skip_ws(p);
+    if (*p->s == 0) {
+        write_sink_putc(ws, '\n');
+        return true;
+    }
+
+    bool need_comma = false;
+
+    for (;;) {
+        skip_ws(p);
+        if (*p->s == 0) break;
+
+        /* Allow empty fields: WRITE ,A  or WRITE , , */
+        if (*p->s == ',' || *p->s == ';') {
+            /* Empty field */
+            if (need_comma) write_sink_putc(ws, ',');
+            /* empty field emits nothing */
+            need_comma = true;
+            p->s++;
+            continue;
+        }
+
+        if (need_comma) write_sink_putc(ws, ',');
+
+        const char *save = p->s;
+        char *sv = NULL;
+        if (parse_string_value(app, p, &sv)) {
+            write_emit_quoted_string(ws, sv);
+            free(sv);
+        } else {
+            p->s = save;
+            double nv = 0.0;
+            if (!parse_expr(app, p, &nv)) return false;
+            char buf[96];
+            double r = round(nv);
+            if (fabs(nv - r) < 1e-12) snprintf(buf, sizeof(buf), "%.0f", r);
+            else snprintf(buf, sizeof(buf), "%.12g", nv);
+            write_sink_puts(ws, buf);
+        }
+
+        need_comma = true;
+
+        skip_ws(p);
+        if (*p->s == ',' || *p->s == ';') {
+            p->s++;
+            continue;
+        }
+        break;
+    }
+
+    write_sink_putc(ws, '\n');
+    return true;
+}
+
+static bool exec_write(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    WriteSink ws;
+    ws.app = app;
+    ws.fp = NULL;
+    ws.to_file = false;
+    return exec_write_common(app, &ws, p, current_line);
+}
+
+static bool exec_write_file(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+
+    skip_ws(p);
+    if (!consume(p, '#')) {
+        runtime_error(app, current_line, "WRITE missing #");
+        return false;
+    }
+
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) {
+        runtime_error(app, current_line, "Bad file handle");
+        return false;
+    }
+    int h = (int)llround(hv);
+
+    if (h <= 0 || h >= BASIC_MAX_FILES) {
+        runtime_error(app, current_line, "Bad file number");
+        return false;
+    }
+
+    BasicFile *bf = file_get(app, h);
+    if (!bf || !bf->fp) {
+        runtime_error(app, current_line, "Bad file number");
+        return false;
+    }
+    if (bf->mode != BF_OUTPUT && bf->mode != BF_APPEND && bf->mode != BF_RANDOM) {
+        /* GW-BASIC: OUTPUT/APPEND are writeable; RANDOM is read/write. */
+        runtime_error(app, current_line, "Bad file mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (consume(p, ',') || consume(p, ';')) { /* ok */ }
+
+    WriteSink ws;
+    ws.app = NULL;
+    ws.fp = bf->fp;
+    ws.to_file = true;
+
+    bool ok = exec_write_common(app, &ws, p, current_line);
+    fflush(bf->fp);
+    return ok;
+}
+
 static void *xmalloc(size_t n) {
     void *p = malloc(n);
     if (!p) {
@@ -5988,6 +6732,26 @@ static char *trim_ws_copy(const char *s) {
     o[n] = 0;
     return o;
 }
+
+
+static char *unescape_doubled_quotes_inner(const char *s) {
+    /* Convert doubled quotes ("") -> " in a WRITE/INPUT-quoted field. */
+    const char *p = (s ? s : "");
+    size_t cap = strlen(p) + 1;
+    char *out = (char*)xmalloc(cap);
+    size_t oi = 0;
+    while (*p) {
+        if (p[0] == '"' && p[1] == '"') {
+            out[oi++] = '"';
+            p += 2;
+            continue;
+        }
+        out[oi++] = *p++;
+    }
+    out[oi] = 0;
+    return out;
+}
+
 
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode) {
     skip_ws(p);
@@ -6077,12 +6841,14 @@ static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mod
             v->kind = V_STR;
             free(v->str);
             size_t L = strlen(field);
-            if (L >= 2 && field[0] == '"' && field[L-1] == '"') {
-                field[L-1] = 0;
-                v->str = xstrdup(field + 1);
-            } else {
-                v->str = xstrdup(field);
-            }
+
+if (L >= 2 && field[0] == '"' && field[L-1] == '"') {
+    field[L-1] = 0;
+    char *un = unescape_doubled_quotes_inner(field + 1);
+    v->str = un; /* takes ownership */
+} else {
+    v->str = xstrdup(field);
+}
         } else {
             v->kind = V_NUM;
             double nv = strtod(field, NULL);
@@ -6112,19 +6878,19 @@ typedef struct InputVarSpec {
 } InputVarSpec;
 
 static bool parse_input_line_fields(const char *line, char ***out_fields, int *out_n) {
-    // Split by commas, honoring quotes (GW-BASIC-ish).
-    // Strictness rules (match GW-BASIC behavior more closely):
-    //  - If any field contains a double quote character, it must be a properly
-    //    quoted field: starts with '"' and ends with '"' (after trimming).
-    //  - No interior quotes are allowed inside a quoted field (GW-BASIC has no escape).
-    //  - Unterminated quoted fields cause a parse failure (caller should '?Redo from start').
+    /* Split by commas, honoring quotes.
+       Strictness (GW-BASIC-ish, tuned for WRITE round-trip):
+         - Unterminated quoted fields => parse failure (?Redo from start).
+         - If a field contains any '"', it must be a quoted field (starts/ends with '"' after trim).
+         - Inside a quoted field, interior quotes must be doubled (""). These are unescaped to a single '"'. */
+
     const char *cur = line ? line : "";
 
     int cap = 8;
     int n = 0;
     char **fields = (char**)xmalloc((size_t)cap * sizeof(char*));
 
-    while (1) {
+    for (;;) {
         bool inq = false;
         const char *start = cur;
         while (*cur) {
@@ -6133,7 +6899,7 @@ static bool parse_input_line_fields(const char *line, char ***out_fields, int *o
             cur++;
         }
 
-        // Unterminated quote: reject the whole input line (GW-BASIC: Redo from start).
+        /* Unterminated quote: reject entire line (GW-BASIC: Redo from start). */
         if (inq && *cur == 0) {
             for (int i = 0; i < n; i++) free(fields[i]);
             free(fields);
@@ -6143,49 +6909,59 @@ static bool parse_input_line_fields(const char *line, char ***out_fields, int *o
         }
 
         const char *end = cur;
-        if (*cur == ',') cur++; // consume comma
+        if (*cur == ',') cur++; /* consume comma */
 
-        // Copy raw field
+        /* Copy + trim raw field */
         size_t L = (size_t)(end - start);
         char *raw = (char*)xmalloc(L + 1);
         memcpy(raw, start, L);
         raw[L] = 0;
-        char *trim = trim_ws_copy(raw);
+        char *field = trim_ws_copy(raw);
         free(raw);
 
-        // Strict quote handling
-        if (strchr(trim, '"')) {
-            size_t tl = strlen(trim);
-            if (tl < 2 || trim[0] != '"' || trim[tl - 1] != '"') {
-                free(trim);
+        /* Strict quote handling + doubled-quote unescape */
+        if (strchr(field, '"')) {
+            size_t tl = strlen(field);
+            if (tl < 2 || field[0] != '"' || field[tl - 1] != '"') {
+                free(field);
                 for (int i = 0; i < n; i++) free(fields[i]);
                 free(fields);
                 *out_fields = NULL;
                 *out_n = 0;
                 return false;
             }
-            // No interior quotes allowed
+
+            char *out = (char*)xmalloc(tl + 1);
+            size_t oi = 0;
             for (size_t i = 1; i + 1 < tl; i++) {
-                if (trim[i] == '"') {
-                    free(trim);
-                    for (int j = 0; j < n; j++) free(fields[j]);
-                    free(fields);
-                    *out_fields = NULL;
-                    *out_n = 0;
-                    return false;
+                char c = field[i];
+                if (c == '"') {
+                    if (i + 1 < tl - 1 && field[i + 1] == '"') {
+                        out[oi++] = '"';
+                        i++; /* consume second quote */
+                    } else {
+                        free(out);
+                        free(field);
+                        for (int j = 0; j < n; j++) free(fields[j]);
+                        free(fields);
+                        *out_fields = NULL;
+                        *out_n = 0;
+                        return false;
+                    }
+                } else {
+                    out[oi++] = c;
                 }
             }
-
-            // Strip outer quotes
-            trim[tl - 1] = 0;
-            memmove(trim, trim + 1, tl - 1);
+            out[oi] = 0;
+            free(field);
+            field = out;
         }
 
         if (n >= cap) {
             cap *= 2;
             fields = (char**)xrealloc(fields, (size_t)cap * sizeof(char*));
         }
-        fields[n++] = trim;
+        fields[n++] = field;
 
         if (*end == 0) break;
     }
@@ -7951,7 +8727,58 @@ if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
         return ok;
     }
 
-    // CLOSE
+    
+
+
+
+// FIELD #n, ...  (RANDOM)
+if (starts_ci(s, "FIELD") && is_word_boundary(s[5])) {
+    Parser p = { s + 5 };
+    bool ok = exec_field(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// LSET var$ = expr$
+if (starts_ci(s, "LSET") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_lset_rset(app, &p, current_line, false);
+    free(tmp);
+    return ok;
+}
+
+// RSET var$ = expr$
+if (starts_ci(s, "RSET") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_lset_rset(app, &p, current_line, true);
+    free(tmp);
+    return ok;
+}
+
+// GET #n, rec  (RANDOM)
+if (starts_ci(s, "GET") && is_word_boundary(s[3])) {
+    Parser p = { s + 3 };
+    bool ok = exec_get(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// PUT #n, rec  (RANDOM)
+if (starts_ci(s, "PUT") && is_word_boundary(s[3])) {
+    Parser p = { s + 3 };
+    bool ok = exec_put(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+// SEEK #n, pos
+if (starts_ci(s, "SEEK") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_seek(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// CLOSE
     if (starts_ci(s, "CLOSE") && is_word_boundary(s[5])) {
         Parser p = { s + 5 };
         bool ok = exec_close(app, &p, current_line);
@@ -8013,7 +8840,23 @@ if (starts_ci(s, "COLOR") && is_word_boundary(s[5])) {
         return ok;
     }
 
-    // PRINT
+    
+// WRITE
+if (starts_ci(s, "WRITE") && is_word_boundary(s[5])) {
+    Parser p = { s + 5 };
+    skip_ws(&p);
+    if (*p.s == '#') {
+        bool ok = exec_write_file(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    bool ok = exec_write(app, &p, current_line);
+    if (!ok) runtime_error_or_pending(app, current_line, "Bad WRITE");
+    free(tmp);
+    return ok;
+}
+
+// PRINT
     if (starts_ci(s, "PRINT") && is_word_boundary(s[5])) {
         Parser p = { s + 5 };
         skip_ws(&p);
@@ -10335,7 +11178,7 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "February 3, 2026";
+const char *about_line3 = "February 4, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
@@ -10544,6 +11387,51 @@ static void input_echo_update(App *app, const char *txt) {
     /* Leave cursor at end of echoed input (terminal-like). */
     (void)save_r; (void)save_c;
 }
+
+/* INPUT$(n) keyboard read (Phase: Binary I/O Tier-1)
+   NOTE: In GTK UI builds, this uses the existing terminal-style input line mechanism
+   (waits for Enter) and returns the first N chars of the entered line.
+*/
+static char *inputdollar_read_keyboard(App *app, int n, int current_line) {
+    if (n <= 0) return xstrdup("");
+#ifdef WBASIC_NO_UI
+    char *buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { runtime_error(app, current_line, "Out of memory"); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, stdin);
+    buf[got] = 0;
+    return buf;
+#else
+    if (!app) return xstrdup("");
+
+    app->input_waiting = true;
+    app->input_ready = false;
+    if (app->input_line) { g_free(app->input_line); app->input_line = NULL; }
+
+    if (app->cmd_entry) gtk_widget_grab_focus(app->cmd_entry);
+
+    set_run_state(app, RUN_WAITING);
+    input_echo_update(app, "");
+
+    while (!app->input_ready && !app->stop_flag && !app->quitting) {
+        ui_pump_raw(app);
+        ui_delay_ms(app, 5);
+    }
+
+    app->input_waiting = false;
+    if (app->stop_flag || app->quitting) return xstrdup("");
+
+    const char *line = app->input_line ? app->input_line : "";
+    size_t L = strlen(line);
+    if ((size_t)n > L) n = (int)L;
+    char *out = (char*)malloc((size_t)n + 1);
+    if (!out) { runtime_error(app, current_line, "Out of memory"); return NULL; }
+    memcpy(out, line, (size_t)n);
+    out[n] = 0;
+    return out;
+#endif
+}
+
+
 
 #ifndef WBASIC_NO_UI
 static void on_cmd_changed(GtkEditable *editable, gpointer user_data) {
@@ -11876,3 +12764,5 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
+
+
