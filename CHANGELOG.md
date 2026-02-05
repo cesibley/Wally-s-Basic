@@ -1,6 +1,9 @@
 # CHANGELOG
 
 ## Patches
+- Fixed Block IF boolean condition parsing
+
+## [V1.07]
 - Changes to eliminate warning during compile. GTK and CLI now compile cleanly.
 - Restored the cli alias target to build the headless binary and marked it phony to match README 
   expectations.

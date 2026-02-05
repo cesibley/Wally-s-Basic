@@ -4006,7 +4006,7 @@ static bool parse_add(App *app, Parser *p, double *out) {
     return true;
 }
 
-static bool parse_relop(Parser *p, char opbuf[3]);
+static bool wbasic_parse_expr(Parser *p, char opbuf[3]);
 static double basic_truth(bool b);
 
 
@@ -4017,7 +4017,7 @@ static bool parse_rel(App *app, Parser *p, double *out) {
 
     char op[3] = {0};
     const char *save = p->s;
-    if (!parse_relop(p, op)) {
+    if (!wbasic_parse_expr(p, op)) {
         p->s = save;
         *out = a;
         return true;
@@ -4071,7 +4071,7 @@ static bool parse_expr(App *app, Parser *p, double *out) {
 
 /* ===================== Condition parsing ===================== */
 
-static bool parse_relop(Parser *p, char opbuf[3]) {
+static bool wbasic_parse_expr(Parser *p, char opbuf[3]) {
     skip_ws(p);
     const char *s = p->s;
     if (s[0] == '=')  { strcpy(opbuf, "=");  p->s += 1; return true; }
@@ -4109,7 +4109,7 @@ static bool parse_cond_atom(App *app, Parser *p, double *out) {
         if (parse_string_value(app, p, &sa)) {
             char op[3] = {0};
             const char *save1 = p->s;
-            if (!parse_relop(p, op)) {
+            if (!wbasic_parse_expr(p, op)) {
                 // No relop: BASIC truthiness for strings (non-empty = true)
                 p->s = save1;
                 *out = basic_truth(sa && sa[0] != '\0');
@@ -4141,7 +4141,7 @@ static bool parse_cond_atom(App *app, Parser *p, double *out) {
 
     char op[3] = {0};
     const char *save = p->s;
-    if (!parse_relop(p, op)) {
+    if (!wbasic_parse_expr(p, op)) {
         p->s = save;
         *out = a;
         return true;
