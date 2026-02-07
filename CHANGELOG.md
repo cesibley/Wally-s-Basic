@@ -75,7 +75,7 @@
   - Fixed type mismatch errors for string vs numeric FN calls.
   - Corrected ERR/ERL reporting for DEF FN errors.
 
--Error Handling
+- Error Handling
   - Fixed ON ERROR GOTO replacement semantics (new handler overrides old).
   - Corrected error handling inside GOSUB while preserving RETURN stack.
   - Fixed RESUME, RESUME NEXT, and RESUME <line> flow behavior.
