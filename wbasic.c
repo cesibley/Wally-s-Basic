@@ -29,11 +29,11 @@
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 7
+#define WBASIC_VERSION_MINOR 11
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.07"
-#define WBASIC_BASELINE_DATE "2026-02-01"
-#define WBASIC_BASELINE_REV "2026-02-01 v1.07"
+#define WBASIC_VERSION_STR "1.11"
+#define WBASIC_BASELINE_DATE "2026-02-05"
+#define WBASIC_BASELINE_REV "2026-02-05 v1.11"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -509,6 +509,14 @@ typedef struct App App;
 static void *xmalloc(size_t n);
 static void *xrealloc(void *ptr, size_t n);
 static char *xstrdup(const char *s);
+static char *inputdollar_read_keyboard(App *app, int n, int current_line);
+static char *pack_i16(int v);
+static char *pack_f32(float f);
+static char *pack_f64(double d);
+static int   unpack_i16(const char *s);
+static float unpack_f32(const char *s);
+static double unpack_f64(const char *s);
+
 
 
 
@@ -674,7 +682,15 @@ static WB_UNUSED void prog_next_stmt(App *app, int li, int si, int *out_li, int 
 static void prog_goto_stmt(App *app, int li, int si, int *out_li, int *out_si);
 
 
+typedef struct {
+    char *name;   /* uppercase var name (e.g., "A$") */
+    int offset;   /* byte offset into record_buf */
+    int len;      /* slice length in bytes */
+} FieldMap;
+
 typedef enum {
+    FILE_MODE_RANDOM,
+
     V_NUM = 0,
     V_STR = 1,
 } VarKind;
@@ -698,13 +714,20 @@ typedef enum {
     BF_INPUT  = 1,
     BF_OUTPUT = 2,
     BF_APPEND = 3,
+    BF_RANDOM = 4,
 } BasicFileMode;
 
 typedef struct {
     FILE *fp;
+    int record_len; /* RANDOM file record length */
+    unsigned char *record_buf; /* RANDOM record buffer (LEN bytes) */
+    FieldMap *fields;          /* FIELD mappings (RANDOM only) */
+    int field_count;
+    int field_cap;
     BasicFileMode mode;
     bool eof_latched; /* once EOF is observed for INPUT, it stays true until CLOSE/OPEN */
 } BasicFile;
+static BasicFile *file_get(App *app, int n);
 
 typedef struct {
     VarKind kind;
@@ -763,6 +786,8 @@ typedef enum {
     GOSUB_RET_CHAIN  = 1    // return into an in-progress ':' statement chain
     ,
     GOSUB_RET_KEYTRAP = 2 // return to (line_idx, stmt_idx) and clear ON KEY in-progress flag
+    ,
+    GOSUB_RET_TIMERTRAP = 3 // return to (line_idx, stmt_idx) and clear ON TIMER in-progress flag
 } GosubRetKind;
 
 typedef struct {
@@ -843,6 +868,15 @@ char *key_macros[10];               // KEY 1..10 strings (NULL = unassigned)
     bool on_key_in_progress;           // reentrancy guard for ON KEY trap
 
     char *runtime_key_macro;            // pending macro to execute in RUN context (owned)
+
+    // ON TIMER(interval) GOSUB trap (GW-BASIC style)
+    double on_timer_interval;           // seconds (0 = unset)
+    int    on_timer_gosub_line;         // BASIC line number target (0 = unset/disabled)
+    bool   timer_enabled;              // TIMER ON/OFF
+    bool   timer_stopped;              // TIMER STOP (pauses)
+    double timer_next_fire;            // next scheduled fire time (TIMER seconds)
+    bool   timer_in_progress;          // reentrancy guard for ON TIMER trap
+
 char *pending_key_macro;            // queued macro to execute (owned)
 bool pending_key_macro_scheduled;   // idle callback scheduled
     char *pending_load_path;   // deferred LOAD path when requested while running
@@ -1615,6 +1649,37 @@ static void ui_delay_ms(App *app, int ms) {
     }
 }
 #endif
+
+/* ---- TIMER event support (GW-BASIC ON TIMER / TIMER ON|OFF|STOP) ---- */
+static double timer_now_sec(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    struct tm lt;
+    time_t t = tv.tv_sec;
+#ifdef _WIN32
+    localtime_s(&lt, &t);
+#else
+    localtime_r(&t, &lt);
+#endif
+    return (double)(lt.tm_hour*3600 + lt.tm_min*60 + lt.tm_sec) + (double)tv.tv_usec/1e6;
+}
+
+/* Midnight wrap-safe: return true if now has reached or passed target, assuming target was set based on timer_now_sec(). */
+static bool timer_reached(double now, double target) {
+    // TIMER wraps at 86400 seconds.
+    const double DAY = 86400.0;
+    double d = now - target;
+    if (d >= 0.0 && d < DAY/2) return true;
+    // Handle wrap: if target is near end of day and now is small.
+    if (d < -DAY/2) return true;
+    return false;
+}
+
+static void timer_schedule_next(App *app, double now) {
+    if (!app || app->on_timer_interval <= 0.0) return;
+    double next = now + app->on_timer_interval;
+    if (next >= 86400.0) next -= 86400.0;
+    app->timer_next_fire = next;
+}
 
 
 #ifndef WBASIC_NO_UI
@@ -3051,6 +3116,11 @@ static bool ident_is_string_var(App *app, const char *name_upper) {
 /* deleted unused static function: ident_is_int_var */
 
 static bool name_is_string(const char *name_upper);
+
+static Var *vars_lookup(App *app, const char *name_upper) {
+    return (Var*)g_hash_table_lookup(app->vars, name_upper);
+}
+
 static Var *vars_get_or_create(App *app, const char *name_upper) {
     Var *v = (Var*)g_hash_table_lookup(app->vars, name_upper);
     if (v) return v;
@@ -3132,6 +3202,9 @@ static void vars_reset(App *app) {
 typedef struct { const char *s; } Parser;
 
 static void skip_ws(Parser *p) { while (isspace((unsigned char)*p->s)) p->s++; }
+
+/* Peek next non-whitespace character without consuming. */
+static char peek(Parser *p) { skip_ws(p); return *p->s; }
 
 static bool consume(Parser *p, char c) {
     skip_ws(p);
@@ -3223,6 +3296,17 @@ static void var_free_array_storage(Var *v) {
         free(v->sarr);
         v->sarr = NULL;
     }
+}
+
+static void var_erase_array(Var *v) {
+    if (!v) return;
+    var_free_array_storage(v);
+    v->is_array = false;
+    v->arr_dims = 0;
+    v->arr_total = 0;
+    memset(v->arr_dim_lo, 0, sizeof(v->arr_dim_lo));
+    memset(v->arr_dim_max, 0, sizeof(v->arr_dim_max));
+    memset(v->arr_stride, 0, sizeof(v->arr_stride));
 }
 
 static bool var_define_num_array(Var *v, int ndims, int base, const int dim_max[5]) {
@@ -3442,6 +3526,7 @@ static bool var_redim_array(Var *v, bool is_string, int ndims, int base, const i
 }
 
 
+static void runtime_error(App *app, int line_no, const char *msg);
 static bool parse_expr(App *app, Parser *p, double *out);
 
 static double func_eof(App *app, int n);
@@ -3483,32 +3568,13 @@ static inline void err_set(App *app, const char *msg);
 
 static bool parse_string_value(App *app, Parser *p, char **out);
 
-static bool parse_factor(App *app, Parser *p, double *out) {
+static bool parse_primary(App *app, Parser *p, double *out) {
     skip_ws(p);
-
-    // unary NOT (bitwise)
-    if (consume_word_ci(p, "NOT")) {
-        double v = 0.0;
-        if (!parse_factor(app, p, &v)) return false;
-        long long iv = (long long)llround(v);
-        *out = (double)(~iv);
-        return true;
-    }
 
 
     if (consume(p, '(')) {
         if (!parse_expr(app, p, out)) return false;
         if (!consume(p, ')')) return false;
-        return true;
-    }
-
-    // unary +/-
-    skip_ws(p);
-    if (*p->s == '+' || *p->s == '-') {
-        char op = *p->s++;
-        double v = 0.0;
-        if (!parse_factor(app, p, &v)) return false;
-        *out = (op == '-') ? -v : v;
         return true;
     }
 
@@ -3633,6 +3699,12 @@ static bool parse_factor(App *app, Parser *p, double *out) {
                 free(name);
                 return false;
             }
+
+            /* GW-BASIC: FNxxx is reserved for user-defined functions.
+               If the function is not defined, raise "Undefined user function". */
+            err_set(app, "Undefined user function");
+            free(name);
+            return false;
         }
 
         // GW-BASIC allows some 0-arg functions/constants without parentheses (notably TIMER, PI, and RND).
@@ -3692,7 +3764,7 @@ if (!strcasecmp(name, "ERL")) {
                 !strcasecmp(name, "ATN") || !strcasecmp(name, "SQR") || !strcasecmp(name, "LOG") ||
                 !strcasecmp(name, "EXP") || !strcasecmp(name, "ABS") || !strcasecmp(name, "INT") ||
                 !strcasecmp(name, "SGN") || !strcasecmp(name, "FIX") || !strcasecmp(name, "CINT") ||
-                !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") ||
+                !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") || !strcasecmp(name, "LOF") || !strcasecmp(name, "SEEK") || !strcasecmp(name, "CVI") || !strcasecmp(name, "CVS") || !strcasecmp(name, "CVD") ||
                 !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND")) {
 
                 consume(p, '(');
@@ -3707,7 +3779,85 @@ if (!strcasecmp(name, "ERL")) {
                     free(name);
                     return true;
                 }
-                /* PI() is a zero-argument constant; PI without () is a normal variable. */
+                
+                /* LOF(n) returns file length in bytes. */
+                if (!strcasecmp(name, "LOF")) {
+                    double hv2 = 0.0;
+                    if (!parse_expr(app, p, &hv2)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    int h2 = (int)llround(hv2);
+                    if (h2 <= 0 || h2 >= BASIC_MAX_FILES || !app->files[h2].fp) {
+                        free(name);
+                        runtime_error(app, 0, "Invalid file handle");
+                        return false;
+                    }
+                    long cur = ftell(app->files[h2].fp);
+                    fseek(app->files[h2].fp, 0, SEEK_END);
+                    long end = ftell(app->files[h2].fp);
+                    fseek(app->files[h2].fp, cur, SEEK_SET);
+                    *out = (double)end;
+                    free(name);
+                    return true;
+                }
+
+                /* SEEK(n) returns current position: record number for RANDOM, else 1-based byte position. */
+                if (!strcasecmp(name, "SEEK")) {
+                    double hv2 = 0.0;
+                    if (!parse_expr(app, p, &hv2)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    int h2 = (int)llround(hv2);
+                    if (h2 <= 0 || h2 >= BASIC_MAX_FILES || !app->files[h2].fp) {
+                        free(name);
+                        runtime_error(app, 0, "Invalid file handle");
+                        return false;
+                    }
+                    long cur = ftell(app->files[h2].fp);
+                    BasicFile *bf = &app->files[h2];
+                    if (bf->mode == BF_RANDOM && bf->record_len > 0) *out = (double)(cur / bf->record_len + 1);
+                    else *out = (double)(cur + 1);
+                    free(name);
+                    return true;
+                }
+
+                /* CVI(s$): unpack 16-bit signed integer */
+if (!strcasecmp(name, "CVI")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = (double)unpack_i16(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* CVS(s$): unpack single-precision float */
+if (!strcasecmp(name, "CVS")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = (double)unpack_f32(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* CVD(s$): unpack double */
+if (!strcasecmp(name, "CVD")) {
+    char *sv=NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); return false; }
+    skip_ws(p);
+    if (!consume(p, ')')) { free(name); free(sv); return false; }
+    *out = unpack_f64(sv);
+    free(sv);
+    free(name);
+    return true;
+}
+
+/* PI() is a zero-argument constant; PI without () is a normal variable. */
                 if (!strcasecmp(name, "PI")) {
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
@@ -3959,6 +4109,32 @@ if (!v->is_array) {
     return false;
 }
 
+/* Power operator: right-associative '^' (GW-BASIC exponentiation). */
+static bool parse_power(App *app, Parser *p, double *out) {
+    if (!parse_primary(app, p, out)) return false;
+    skip_ws(p);
+    if (consume(p, '^')) {
+        double rhs = 0.0;
+        if (!parse_power(app, p, &rhs)) return false; // right-associative
+        *out = pow(*out, rhs);
+    }
+    return true;
+}
+
+static bool parse_factor(App *app, Parser *p, double *out) {
+    skip_ws(p);
+    // unary +/-
+    if (*p->s == '+' || *p->s == '-') {
+        char op = *p->s++;
+        double v = 0.0;
+        if (!parse_factor(app, p, &v)) return false;
+        *out = (op == '-') ? -v : v;
+        return true;
+    }
+
+    return parse_power(app, p, out);
+}
+
 static bool parse_term(App *app, Parser *p, double *out) {
     if (!parse_factor(app, p, out)) return false;
     for (;;) {
@@ -3977,14 +4153,23 @@ static bool parse_term(App *app, Parser *p, double *out) {
         }
 
         char op = *p->s;
-        if (op != '*' && op != '/') break;
+        // GW-BASIC: integer division operator "\\" has the same precedence as * and /.
+        // It operates on integer-truncated operands (toward zero).
+        if (op != '*' && op != '/' && op != '\\') break;
         p->s++;
         double rhs = 0.0;
         if (!parse_factor(app, p, &rhs)) return false;
-        if (op == '*') *out = (*out) * rhs;
-        else {
+        if (op == '*') {
+            *out = (*out) * rhs;
+        } else if (op == '/') {
             if (rhs == 0.0) { err_set(app, "Division by zero"); return false; }
             *out = (*out) / rhs;
+        } else {
+            // Integer division (\): truncate operands toward zero before dividing, and truncate result toward zero.
+            long long a = (long long)trunc(*out);
+            long long b = (long long)trunc(rhs);
+            if (b == 0) { err_set(app, "Division by zero"); return false; }
+            *out = (double)(a / b);
         }
     }
     return true;
@@ -4006,18 +4191,71 @@ static bool parse_add(App *app, Parser *p, double *out) {
     return true;
 }
 
-static bool parse_relop(Parser *p, char opbuf[3]);
+static bool wbasic_parse_expr(Parser *p, char opbuf[3]);
 static double basic_truth(bool b);
+
+/* Error state helpers are defined later; forward declare for expression parsing. */
+static inline void err_clear(App *app);
+static inline void err_set(App *app, const char *msg);
 
 
 static bool parse_rel(App *app, Parser *p, double *out) {
-    // Allow relational operators in numeric expressions (GW-BASIC semantics: TRUE=-1, FALSE=0)
+    /*
+     * Relational operators inside numeric expressions (GW-BASIC semantics: TRUE=-1, FALSE=0).
+     *
+     * GW-BASIC also allows string comparisons to yield numeric truth, e.g.:
+     *   X = ("A"="A")
+     *   IF ("A"<"B") THEN ...
+     *
+     * To match that, we first try parsing a string relational expression:
+     *   <string-expr> <relop> <string-expr>
+     * If that doesn't match, we fall back to the numeric path.
+     */
+    const char *save0 = p->s;
+
+    /* --- Try string relational: <string> <relop> <string> --- */
+    err_clear(app);
+    char *sa = NULL;
+    if (parse_string_value(app, p, &sa)) {
+        char op[3] = {0};
+        const char *save_op = p->s;
+        if (wbasic_parse_expr(p, op)) {
+            char *sb = NULL;
+            if (!parse_string_value(app, p, &sb)) { free(sa); return false; }
+
+            int cmp = strcmp(sa ? sa : "", sb ? sb : "");
+            free(sa);
+            free(sb);
+
+            if (strcmp(op, "=") == 0) *out = basic_truth(cmp == 0);
+            else if (strcmp(op, "<>") == 0) *out = basic_truth(cmp != 0);
+            else if (strcmp(op, "<") == 0) *out = basic_truth(cmp < 0);
+            else if (strcmp(op, ">") == 0) *out = basic_truth(cmp > 0);
+            else if (strcmp(op, "<=") == 0) *out = basic_truth(cmp <= 0);
+            else if (strcmp(op, ">=") == 0) *out = basic_truth(cmp >= 0);
+            else { err_set(app, "Type mismatch"); return false; }
+
+            return true;
+        }
+
+        /* Parsed a string expression but not a relational op: not valid in numeric context. */
+        p->s = save_op;
+        free(sa);
+        err_set(app, "Type mismatch");
+        return false;
+    }
+
+    /* Not a string-relational; restore and fall back to numeric parsing. */
+    p->s = save0;
+    err_clear(app);
+
+    // Numeric relational: <add> [<relop> <add>]
     double a = 0.0;
     if (!parse_add(app, p, &a)) return false;
 
     char op[3] = {0};
     const char *save = p->s;
-    if (!parse_relop(p, op)) {
+    if (!wbasic_parse_expr(p, op)) {
         p->s = save;
         *out = a;
         return true;
@@ -4037,8 +4275,22 @@ static bool parse_rel(App *app, Parser *p, double *out) {
     return true;
 }
 
+
+static bool parse_not(App *app, Parser *p, double *out) {
+    // GW-BASIC precedence: arithmetic/relational happen before NOT.
+    // NOT is bitwise complement on the integer-rounded operand.
+    if (consume_word_ci(p, "NOT")) {
+        double v = 0.0;
+        if (!parse_not(app, p, &v)) return false; // allow NOT NOT ...
+        long long iv = (long long)llround(v);
+        *out = (double)(~iv);
+        return true;
+    }
+    return parse_rel(app, p, out);
+}
+
 static bool parse_bitand(App *app, Parser *p, double *out) {
-    if (!parse_rel(app, p, out)) return false;
+    if (!parse_not(app, p, out)) return false;
     for (;;) {
         if (!consume_word_ci(p, "AND")) break;
         double rhs = 0.0;
@@ -4063,15 +4315,28 @@ static bool parse_bitor(App *app, Parser *p, double *out) {
     return true;
 }
 
+static bool parse_xor(App *app, Parser *p, double *out) {
+    if (!parse_bitor(app, p, out)) return false;
+    for (;;) {
+        if (!consume_word_ci(p, "XOR")) break;
+        double rhs = 0.0;
+        if (!parse_bitor(app, p, &rhs)) return false;
+        long long a = (long long)llround(*out);
+        long long b = (long long)llround(rhs);
+        *out = (double)(a ^ b);
+    }
+    return true;
+}
+
 static bool parse_expr(App *app, Parser *p, double *out) {
-    // Numeric expression with GW-BASIC-style bitwise operators:
-    // NOT (in parse_factor) > * / > + - > AND > OR
-    return parse_bitor(app, p, out);
+    // Numeric expression precedence (GW-BASIC-style, subset):
+    // power(^) > unary(+/-) > */ MOD > +/- > relops -> truth(-1/0) > NOT > AND > OR > XOR
+    return parse_xor(app, p, out);
 }
 
 /* ===================== Condition parsing ===================== */
 
-static bool parse_relop(Parser *p, char opbuf[3]) {
+static bool wbasic_parse_expr(Parser *p, char opbuf[3]) {
     skip_ws(p);
     const char *s = p->s;
     if (s[0] == '=')  { strcpy(opbuf, "=");  p->s += 1; return true; }
@@ -4096,10 +4361,39 @@ static bool parse_cond_or(App *app, Parser *p, double *out);
 
 static bool parse_cond_atom(App *app, Parser *p, double *out) {
     skip_ws(p);
-    if (consume(p, '(')) {
-        if (!parse_cond_or(app, p, out)) return false;
-        if (!consume(p, ')')) return false;
-        return true;
+    /*
+     * Parentheses at the start of a condition are ambiguous in GW-BASIC:
+     *   - IF (A=1 OR B=2) AND C=3 THEN   -> grouping for boolean logic
+     *   - IF (A*2)+B=20 THEN             -> arithmetic subexpression
+     *
+     * Our condition grammar supports both by only treating a leading '(' as
+     * boolean-grouping when the matching ')' is followed by a boolean boundary
+     * (end/THEN/AND/OR/)/:, etc). If the ')' is immediately followed by an
+     * arithmetic or relational operator (+ - * / ^ = < >), we fall back to numeric
+     * expression parsing so constructs like (A*2)+B work correctly.
+     */
+    {
+        const char *save0 = p->s;
+        Parser t = { p->s };
+        skip_ws(&t);
+        if (*t.s == '(') {
+            if (consume(p, '(')) {
+                if (parse_cond_or(app, p, out) && consume(p, ')')) {
+                    Parser la = { p->s };
+                    skip_ws(&la);
+                    char c = *la.s;
+                    if (c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='=' || c=='<' || c=='>') {
+                        /* Looks like arithmetic/relational continuation; not a boolean-grouped atom. */
+                        p->s = save0;
+                    } else {
+                        return true;
+                    }
+                } else {
+                    /* Grouping attempt failed; rewind and try other parses. */
+                    p->s = save0;
+                }
+            }
+        }
     }
 
     // String relational: <str> [relop <str>]
@@ -4109,7 +4403,7 @@ static bool parse_cond_atom(App *app, Parser *p, double *out) {
         if (parse_string_value(app, p, &sa)) {
             char op[3] = {0};
             const char *save1 = p->s;
-            if (!parse_relop(p, op)) {
+            if (!wbasic_parse_expr(p, op)) {
                 // No relop: BASIC truthiness for strings (non-empty = true)
                 p->s = save1;
                 *out = basic_truth(sa && sa[0] != '\0');
@@ -4141,7 +4435,7 @@ static bool parse_cond_atom(App *app, Parser *p, double *out) {
 
     char op[3] = {0};
     const char *save = p->s;
-    if (!parse_relop(p, op)) {
+    if (!wbasic_parse_expr(p, op)) {
         p->s = save;
         *out = a;
         return true;
@@ -4322,7 +4616,53 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     char *lit = NULL;
     if (parse_string_literal(p, &lit)) { *out = lit; return true; }
     p->s = save;
-    // Built-in: INKEY$ (non-blocking). Returns "" if no key available, else a 1-char string.
+    
+// Built-in: INPUT$(n[,#h]) - reads N chars from keyboard or from an open file.
+{
+    const char *save2 = p->s;
+    if (consume_word_ci(p, "INPUT$")) {
+        skip_ws(p);
+        if (!consume(p, '(')) { p->s = save2; return false; }
+
+        double nv = 0.0;
+        if (!parse_expr(app, p, &nv)) { p->s = save2; return false; }
+        int n = (int)llround(nv);
+        if (n < 0) n = 0;
+
+        skip_ws(p);
+        if (consume(p, ',')) {
+            skip_ws(p);
+            if (!consume(p, '#')) { runtime_error(app, 0, "Bad file number"); return false; }
+            double hv = 0.0;
+            if (!parse_expr(app, p, &hv)) { runtime_error(app, 0, "Bad file number"); return false; }
+            int h = (int)llround(hv);
+
+            BasicFile *bf = file_get(app, h);
+            if (!bf || !bf->fp) { runtime_error(app, 0, "Bad file number"); return false; }
+
+            skip_ws(p);
+            if (!consume(p, ')')) { runtime_error(app, 0, "INPUT$ missing ')'"); return false; }
+
+            char *buf = (char*)malloc((size_t)n + 1);
+            if (!buf) { runtime_error(app, 0, "Out of memory"); return false; }
+            size_t got = fread(buf, 1, (size_t)n, bf->fp);
+            buf[got] = 0;
+            *out = buf;
+            return true;
+        }
+
+        skip_ws(p);
+        if (!consume(p, ')')) { runtime_error(app, 0, "INPUT$ missing ')'"); return false; }
+
+        char *s = inputdollar_read_keyboard(app, n, 0);
+        if (!s) return false;
+        *out = s;
+        return true;
+    }
+    p->s = save2;
+}
+
+// Built-in: INKEY$ (non-blocking). Returns "" if no key available, else a 1-char string.
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
@@ -4350,6 +4690,46 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
 
 
 
+
+
+// Built-in: UCASE$(s$) / LCASE$(s$) — ASCII case conversion (GW-BASIC compatible)
+    {
+        const char *save2 = p->s;
+
+        bool to_upper = false;
+        bool to_lower = false;
+
+        if (consume_word_ci(p, "UCASE$")) to_upper = true;
+        else if (consume_word_ci(p, "LCASE$")) to_lower = true;
+
+        if (to_upper || to_lower) {
+            skip_ws(p);
+            if (!consume(p, '(')) { p->s = save2; return false; }
+
+            char *arg = NULL;
+            if (!parse_string_value(app, p, &arg)) { p->s = save2; return false; }
+
+            skip_ws(p);
+            if (!consume(p, ')')) { free(arg); runtime_error(app, 0, "Illegal function call"); return false; }
+
+            size_t n = arg ? strlen(arg) : 0;
+            char *buf = (char*)malloc(n + 1);
+            if (!buf) { free(arg); runtime_error(app, 0, "Out of memory"); return false; }
+
+            for (size_t k = 0; k < n; k++) {
+                unsigned char c = (unsigned char)arg[k];
+                if (to_upper) buf[k] = (char)((c >= 'a' && c <= 'z') ? (c - 'a' + 'A') : c);
+                else buf[k] = (char)((c >= 'A' && c <= 'Z') ? (c - 'A' + 'a') : c);
+            }
+            buf[n] = 0;
+
+            free(arg);
+            *out = buf;
+            return true;
+        }
+
+        p->s = save2;
+    }
 
     char *name = NULL;
     if (parse_identifier(p, &name)) {
@@ -4402,7 +4782,11 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
                             argv_num[argc] = 0.0;
 
                             if (name_is_string(pn)) {
-                                if (!parse_string_value(app, p, &argv_str[argc])) goto fnstr_fail;
+                                if (!parse_string_value(app, p, &argv_str[argc])) {
+                                    /* GW-BASIC: no coercion between numeric and string args. */
+                                    err_set(app, "Type mismatch");
+                                    goto fnstr_fail;
+                                }
                             } else {
                                 if (!parse_expr(app, p, &argv_num[argc])) goto fnstr_fail;
                             }
@@ -4518,6 +4902,12 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
                 free(name);
                 return false;
             }
+
+            /* GW-BASIC: FNxxx$ is reserved for user-defined string functions.
+               If the function is not defined, raise "Undefined user function". */
+            err_set(app, "Undefined user function");
+            free(name);
+            return false;
         }
         // Built-in string functions
         if (!strcasecmp(name, "CHR$")) {
@@ -4533,7 +4923,49 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
             free(name);
             return true;
         }
-        if (!strcasecmp(name, "STR$")) {
+                if (!strcasecmp(name, "MKI$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_i16((int)llround(v));
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+                if (!strcasecmp(name, "MKS$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_f32((float)v);
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+                if (!strcasecmp(name, "MKD$")) {
+                    skip_ws(p);
+                    if (!consume(p, '(')) { free(name); return false; }
+                    double v = 0.0;
+                    if (!parse_expr(app, p, &v)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    char *s = pack_f64(v);
+                    if (!s) { free(name); runtime_error(app, 0, "Out of memory"); return false; }
+                    *out = s;
+                    free(name);
+                    return true;
+                }
+
+if (!strcasecmp(name, "STR$")) {
             skip_ws(p);
             if (!consume(p, '(')) { free(name); return false; }
             double dv = 0.0;
@@ -4883,6 +5315,9 @@ static int gw_error_code_from_msg(const char *msg) {
         { "WHILE without WEND", 29 },
         { "WEND without WHILE", 30 },
 
+        /* DEF FN */
+        { "Undefined user function", 35 },
+
         /* Undefined line number / missing targets */
         { "Undefined line number", 8 },
         { "target not found", 8 }, /* GOTO/GOSUB/ON/THEN/ELSE target not found */
@@ -5053,6 +5488,31 @@ static void stmtlist_free(StmtList *sl) {
     sl->count = 0;
 }
 
+// Strip inline comments from a statement chunk (outside quotes).
+// GW-BASIC allows: A=1 REM comment
+// We treat REM as a comment-start only when it appears as a standalone keyword
+// outside quotes (word boundaries) and is not the first token of the statement.
+static void strip_inline_rem_comment(char *s) {
+    if (!s) return;
+    bool inq = false;
+    for (char *p = s; *p; p++) {
+        char c = *p;
+        if (c == '"' && (p == s || p[-1] != '\\')) inq = !inq;
+        if (inq) continue;
+        if ((p[0] == 'R' || p[0] == 'r') && (p[1] == 'E' || p[1] == 'e') && (p[2] == 'M' || p[2] == 'm')) {
+            // Require word boundary after REM.
+            if (!is_word_boundary(p[3])) continue;
+            // Require boundary before REM.
+            if (p == s) continue; // leading REM is a full-line comment; keep it intact
+            char prev = p[-1];
+            if (!(prev == ' ' || prev == '\t' || is_word_boundary(prev))) continue;
+            *p = 0;
+            trim(s);
+            return;
+        }
+    }
+}
+
 static StmtList split_statements(const char *line_text) {
     // split by ':' not within double quotes
     StmtList sl = {0};
@@ -5070,6 +5530,22 @@ static StmtList split_statements(const char *line_text) {
     for (const char *s = line_text; ; s++) {
         char c = *s;
         if (c == '"' && (s == line_text || s[-1] != '\\')) inq = !inq;
+
+        /* Inline REM comment handling (GW-BASIC):
+           A=1 REM anything here is ignored, and ':' inside the comment must
+           NOT be treated as statement separators.
+           We detect REM as a standalone keyword outside quotes, and terminate
+           the rest of the line at the 'R' (like apostrophe comments). */
+        if (!inq && (c == 'R' || c == 'r') && starts_ci(s, "REM") && is_word_boundary(s[3])) {
+            bool ok_prev = (s == line_text);
+            if (!ok_prev) {
+                char prev = s[-1];
+                ok_prev = (prev == ' ' || prev == '\t' || is_word_boundary(prev));
+            }
+            if (ok_prev) {
+                c = 0; /* end-of-line at start of REM */
+            }
+        }
 
         /* Apostrophe (') starts an inline comment like REM, but not inside strings.
            It terminates the rest of the *line*, unless this statement itself is REM. */
@@ -5140,6 +5616,9 @@ if (do_split && c == ':' && !inq) {
             memcpy(chunk, start, len);
             chunk[len] = 0;
             char *t = trim(chunk);
+            // GW-BASIC permits inline REM comments after statements: A=1 REM ...
+            // Strip them here so trailing comment text doesn't cause syntax errors.
+            strip_inline_rem_comment(t);
             // keep even empty? no, drop empties
             if (*t) {
                 char *keep = xstrdup(t);
@@ -5284,13 +5763,156 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
 static bool exec_single_statement(App *app, const char *stmt, int current_line, int cur_li, int cur_si, int *line_idx, int *stmt_idx);
 
 
+
+
+
+/* ---- Phase 5: Binary packing helpers ----
+   NOTE: WBASIC strings are currently NUL-terminated C strings (not binary-length strings).
+   To make MKI$/MKS$/MKD$ and CVI/CVS/CVD usable without a full binary-string refactor, we store floats/doubles in
+   big-endian order to avoid leading NULs for common values, and CVS/CVD tolerate truncated
+   strings (missing tail bytes are treated as 0).
+*/
+static char *pack_i16(int v) {
+    char *s = (char*)malloc(3);
+    if (!s) return NULL;
+    s[0] = (char)(v & 0xFF);
+    s[1] = (char)((v >> 8) & 0xFF);
+    s[2] = 0;
+    return s;
+}
+static char *pack_f32(float f) {
+    char *s = (char*)malloc(5);
+    if (!s) return NULL;
+    union { float f; unsigned char b[4]; } u;
+    u.f = f;
+    // big-endian
+    s[0] = (char)u.b[3];
+    s[1] = (char)u.b[2];
+    s[2] = (char)u.b[1];
+    s[3] = (char)u.b[0];
+    s[4] = 0;
+    return s;
+}
+static char *pack_f64(double d) {
+    char *s = (char*)malloc(9);
+    if (!s) return NULL;
+    union { double d; unsigned char b[8]; } u;
+    u.d = d;
+    // big-endian
+    for (int i = 0; i < 8; i++) s[i] = (char)u.b[7 - i];
+    s[8] = 0;
+    return s;
+}
+static int unpack_i16(const char *s) {
+    if (!s) return 0;
+    unsigned char b0 = (unsigned char)s[0];
+    unsigned char b1 = (unsigned char)s[1];
+    short v = (short)(b0 | (b1 << 8));
+    return (int)v;
+}
+static float unpack_f32(const char *s) {
+    union { float f; unsigned char b[4]; } u;
+    for (int i = 0; i < 4; i++) u.b[i] = 0;
+    if (s) {
+        size_t n = strlen(s);
+        if (n > 4) n = 4;
+        // input big-endian -> place into u.b[3..0]
+        for (size_t i = 0; i < n; i++) u.b[3 - (int)i] = (unsigned char)s[i];
+    }
+    return u.f;
+}
+static double unpack_f64(const char *s) {
+    union { double d; unsigned char b[8]; } u;
+    for (int i = 0; i < 8; i++) u.b[i] = 0;
+    if (s) {
+        size_t n = strlen(s);
+        if (n > 8) n = 8;
+        // input big-endian -> place into u.b[7..0]
+        for (size_t i = 0; i < n; i++) u.b[7 - (int)i] = (unsigned char)s[i];
+    }
+    return u.d;
+}
+
+/* ---- RANDOM FIELD helpers (Phase 4) ---- */
+static void field_clear(BasicFile *bf) {
+    if (!bf) return;
+    if (bf->fields) {
+        for (int i = 0; i < bf->field_count; i++) {
+            free(bf->fields[i].name);
+        }
+        free(bf->fields);
+    }
+    bf->fields = NULL;
+    bf->field_count = 0;
+    bf->field_cap = 0;
+}
+
+static FieldMap *field_find(BasicFile *bf, const char *upper_name) {
+    if (!bf || !bf->fields) return NULL;
+    for (int i = 0; i < bf->field_count; i++) {
+        if (!strcmp(bf->fields[i].name, upper_name)) return &bf->fields[i];
+    }
+    return NULL;
+}
+
+static bool field_lookup(App *app, const char *upper_name, BasicFile **out_bf, FieldMap **out_fm) {
+    for (int i = 1; i < BASIC_MAX_FILES; i++) {
+        BasicFile *bf = &app->files[i];
+        if (!bf->fp) continue;
+        FieldMap *fm = field_find(bf, upper_name);
+        if (fm) {
+            *out_bf = bf;
+            *out_fm = fm;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void field_sync_vars(App *app, BasicFile *bf) {
+    if (!bf || !bf->fields || !bf->record_buf) return;
+    for (int i = 0; i < bf->field_count; i++) {
+        FieldMap *fm = &bf->fields[i];
+        Var *v = vars_get_or_create(app, fm->name);
+        if (!v) continue;
+        // Copy slice into scalar string (fixed-length, but stored as C string)
+        char *s = (char*)malloc((size_t)fm->len + 1);
+        if (!s) continue;
+        memcpy(s, bf->record_buf + fm->offset, (size_t)fm->len);
+        s[fm->len] = 0;
+        v->kind = V_STR;
+        free(v->str);
+        v->str = s;
+    }
+}
+
+static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool right_justify) {
+    // Pad with spaces and truncate. GW-BASIC style for LSET/RSET.
+    memset(bf->record_buf + fm->offset, ' ', (size_t)fm->len);
+    size_t sl = src ? strlen(src) : 0;
+    if (sl > (size_t)fm->len) sl = (size_t)fm->len;
+    if (right_justify) {
+        size_t start = (size_t)fm->len - sl;
+        memcpy(bf->record_buf + fm->offset + (int)start, src, sl);
+    } else {
+        memcpy(bf->record_buf + fm->offset, src, sl);
+    }
+}
+
 /* ---- File I/O helpers ---- */
 static void files_close_all(App *app);
 static BasicFile *file_get(App *app, int n);
 static bool exec_defint(App *app, Parser *p, int current_line);
 static bool exec_open(App *app, Parser *p, int current_line);
+static bool exec_field(App *app, Parser *p, int current_line);
+static bool exec_lset_rset(App *app, Parser *p, int current_line, bool right_justify);
+static bool exec_get(App *app, Parser *p, int current_line);
+static bool exec_put(App *app, Parser *p, int current_line);
+static bool exec_seek(App *app, Parser *p, int current_line);
 static bool exec_close(App *app, Parser *p, int current_line);
 static bool exec_print_file(App *app, Parser *p, int current_line);
+static bool exec_write(App *app, Parser *p, int current_line);
+static bool exec_write_file(App *app, Parser *p, int current_line);
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode);
 static bool exec_statement_chain_from(App *app, const char *text, int current_line,
                                      int base_line_idx, int base_stmt_idx,
@@ -5753,9 +6375,42 @@ static double func_eof(App *app, int n) {
 static bool exec_open(App *app, Parser *p, int current_line) {
     skip_ws(p);
     char *path = NULL;
-    if (!parse_string_value(app, p, &path)) {
-        runtime_error(app, current_line, "OPEN requires filename");
-        return false;
+    /*
+     * GW-BASIC allows OPEN to take a filename expression, including a plain
+     * string variable like FN$.
+     *
+     * In normal operation we parse a full string expression. However, OPEN is
+     * common enough (and used heavily by the torture suite) that we include a
+     * conservative fallback: if the general string-expression parser fails,
+     * accept a bare string variable token and use its current value.
+     */
+    {
+        const char *save = p->s;
+        if (!parse_string_value(app, p, &path)) {
+            p->s = save;
+            char *name = NULL;
+            if (parse_identifier(p, &name) && name && name_is_string(name)) {
+                /* Only treat as a variable if this isn't immediately a call (FNx$(...)). */
+                const char *after = p->s;
+                Parser tmp = *p;
+                skip_ws(&tmp);
+                if (peek(&tmp) != '(') {
+                    Var *v = vars_get_or_create(app, name);
+                    path = xstrdup((v && v->kind == V_STR && v->str) ? v->str : "");
+                    free(name);
+                } else {
+                    p->s = after;
+                    free(name);
+                }
+            } else {
+                if (name) free(name);
+            }
+
+            if (!path) {
+                runtime_error(app, current_line, "OPEN requires filename");
+                return false;
+            }
+        }
     }
 
     if (!consume_word_ci(p, "FOR")) {
@@ -5768,9 +6423,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     if (consume_word_ci(p, "INPUT")) mode = BF_INPUT;
     else if (consume_word_ci(p, "OUTPUT")) mode = BF_OUTPUT;
     else if (consume_word_ci(p, "APPEND")) mode = BF_APPEND;
+    else if (consume_word_ci(p, "RANDOM")) mode = BF_RANDOM;
     else {
         free(path);
-        runtime_error(app, current_line, "OPEN mode must be INPUT/OUTPUT/APPEND");
+        runtime_error(app, current_line, "OPEN mode must be INPUT/OUTPUT/APPEND/RANDOM");
         return false;
     }
 
@@ -5796,6 +6452,32 @@ static bool exec_open(App *app, Parser *p, int current_line) {
         return false;
     }
 
+    int rec_len = 0;
+    if (mode == BF_RANDOM) {
+        // GW-BASIC style: OPEN "file" FOR RANDOM AS #n LEN=<reclen>
+        skip_ws(p);
+        if (consume_word_ci(p, "LEN")) {
+            skip_ws(p);
+            if (!consume(p, '=')) {
+                free(path);
+                runtime_error(app, current_line, "OPEN RANDOM missing LEN=");
+                return false;
+            }
+            double lv = 0.0;
+            if (!parse_expr(app, p, &lv)) {
+                free(path);
+                runtime_error(app, current_line, "Bad LEN value");
+                return false;
+            }
+            rec_len = (int)llround(lv);
+        }
+        if (rec_len <= 0) {
+            free(path);
+            runtime_error(app, current_line, "OPEN RANDOM requires LEN=<record_length>");
+            return false;
+        }
+    }
+
     BasicFile *bf = file_get(app, h);
     // GW-BASIC: OPEN on an already-open file handle raises ERR 55 (File already open).
     if (bf && bf->fp) {
@@ -5804,7 +6486,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
         return false;
     }
 
-    const char *fmode = (mode == BF_INPUT) ? "r" : (mode == BF_OUTPUT) ? "w" : "a";
+    const char *fmode = (mode == BF_INPUT)  ? "r"  :
+                       (mode == BF_OUTPUT) ? "w"  :
+                       (mode == BF_APPEND) ? "a"  :
+                       /* BF_RANDOM */        "r+b";
 
     // Resolve relative paths against the directory of the currently loaded BASIC program.
     // This matches typical GW-BASIC expectations (SAVE/LOAD files live alongside the .BAS).
@@ -5822,6 +6507,10 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     }
 
     bf->fp = fopen(open_path, fmode);
+    if (!bf->fp && mode == BF_RANDOM) {
+        // Create if missing (read/write binary)
+        bf->fp = fopen(open_path, "w+b");
+    }
     g_free(open_path);
     if (!bf->fp) {
         free(path);
@@ -5830,11 +6519,229 @@ static bool exec_open(App *app, Parser *p, int current_line) {
     }
 
     bf->mode = mode;
+    bf->record_len = (mode == BF_RANDOM) ? rec_len : 0;
+    if (mode == BF_RANDOM) {
+        field_clear(bf);
+        if (bf->record_buf) { free(bf->record_buf); bf->record_buf = NULL; }
+        bf->record_buf = (unsigned char*)calloc((size_t)rec_len, 1);
+        if (!bf->record_buf) { free(path); runtime_error(app, current_line, "Out of memory"); return false; }
+    } else {
+        if (bf->record_buf) { free(bf->record_buf); bf->record_buf = NULL; }
+        field_clear(bf);
+    }
     bf->eof_latched = false;
 
     free(path);
     return true;
 }
+
+// Phase 2: SEEK #n, pos
+// - For RANDOM files: pos is 1-based record number; seeks to (pos-1)*record_len
+// - For others: pos is 1-based byte position; seeks to (pos-1)
+static bool exec_seek(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "SEEK requires #n"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, 0, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "SEEK requires #n, pos"); return false; }
+
+    double pv = 0.0;
+    if (!parse_expr(app, p, &pv)) { runtime_error(app, current_line, "Bad SEEK position"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    long pos = 0;
+    if (bf->mode == BF_RANDOM) {
+        if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+        pos = (long)((pv - 1.0) * (double)bf->record_len);
+    } else {
+        pos = (long)pv - 1;
+    }
+    if (pos < 0) pos = 0;
+
+    if (fseek(bf->fp, pos, SEEK_SET) != 0) { runtime_error(app, current_line, "SEEK failed"); return false; }
+    bf->eof_latched = false;
+    field_sync_vars(app, bf);
+    return true;
+}
+
+// Phase 3: GET #n, rec  (RANDOM files)
+static bool exec_get(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "GET requires #n, rec"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET requires #n, rec"); return false; }
+
+    double rv = 0.0;
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "Bad record number"); return false; }
+    long rec = (long)llround(rv);
+    if (rec <= 0) { runtime_error(app, current_line, "Record number out of range"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "GET only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    long off = (rec - 1) * (long)bf->record_len;
+    if (fseek(bf->fp, off, SEEK_SET) != 0) { runtime_error(app, current_line, "GET seek failed"); return false; }
+
+    size_t got = fread(bf->record_buf, 1, (size_t)bf->record_len, bf->fp);
+    if (got < (size_t)bf->record_len) {
+        // Beyond EOF: fill remainder with NUL bytes (0x00) for now.
+        memset(bf->record_buf + got, 0, (size_t)bf->record_len - got);
+    }
+
+        bf->eof_latched = false;
+        field_sync_vars(app, bf);
+        return true;
+}
+
+
+// Phase 3: PUT #n, rec  (RANDOM files)
+static bool exec_put(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "PUT requires #n, rec"); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    if (h <= 0 || h >= BASIC_MAX_FILES || !app->files[h].fp) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT requires #n, rec"); return false; }
+
+    double rv = 0.0;
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "Bad record number"); return false; }
+    long rec = (long)llround(rv);
+    if (rec <= 0) { runtime_error(app, current_line, "Record number out of range"); return false; }
+
+    BasicFile *bf = &app->files[h];
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "PUT only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        // No FIELD support yet (Phase 4). For Phase 3 we create an all-zero record buffer.
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    long off = (rec - 1) * (long)bf->record_len;
+    if (fseek(bf->fp, off, SEEK_SET) != 0) { runtime_error(app, current_line, "PUT seek failed"); return false; }
+
+    size_t wrote = fwrite(bf->record_buf, 1, (size_t)bf->record_len, bf->fp);
+    if (wrote != (size_t)bf->record_len) { runtime_error(app, current_line, "PUT write failed"); return false; }
+    fflush(bf->fp);
+
+    bf->eof_latched = false;
+    return true;
+}
+
+// Phase 4: FIELD #n, <len> AS <var$>, <len> AS <var$>, ...
+static bool exec_field(App *app, Parser *p, int current_line) {
+    skip_ws(p);
+    if (!consume(p, '#')) { runtime_error(app, current_line, "FIELD requires #n, ..."); return false; }
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) { runtime_error(app, current_line, "Bad file handle"); return false; }
+    int h = (int)llround(hv);
+    BasicFile *bf = file_get(app, h);
+    if (!bf) { runtime_error(app, current_line, "Invalid file handle"); return false; }
+    if (bf->mode != BF_RANDOM) { runtime_error(app, current_line, "FIELD only valid for RANDOM files"); return false; }
+    if (bf->record_len <= 0) { runtime_error(app, current_line, "RANDOM file missing LEN"); return false; }
+    if (!bf->record_buf) {
+        bf->record_buf = (unsigned char*)calloc((size_t)bf->record_len, 1);
+        if (!bf->record_buf) { runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    skip_ws(p);
+    if (!consume(p, ',')) { runtime_error(app, current_line, "FIELD requires #n, ..."); return false; }
+
+    // Replace any existing mapping for this file handle
+    field_clear(bf);
+
+    int off = 0;
+    while (1) {
+        double lv = 0.0;
+        if (!parse_expr(app, p, &lv)) { runtime_error(app, current_line, "Bad FIELD length"); return false; }
+        int len = (int)llround(lv);
+        if (len <= 0) { runtime_error(app, current_line, "Bad FIELD length"); return false; }
+
+        skip_ws(p);
+        if (!consume_word_ci(p, "AS")) { runtime_error(app, current_line, "FIELD missing AS"); return false; }
+
+        char *vname = NULL;
+        if (!parse_identifier(p, &vname)) { runtime_error(app, current_line, "FIELD expected variable"); return false; }
+        if (!ident_is_string_var(app, vname)) { free(vname); runtime_error(app, current_line, "FIELD variable must be string"); return false; }
+
+        if (off + len > bf->record_len) { free(vname); runtime_error(app, current_line, "FIELD exceeds record LEN"); return false; }
+
+        if (bf->field_count >= bf->field_cap) {
+            int ncap = bf->field_cap ? bf->field_cap * 2 : 8;
+            FieldMap *nf = (FieldMap*)realloc(bf->fields, (size_t)ncap * sizeof(FieldMap));
+            if (!nf) { free(vname); runtime_error(app, current_line, "Out of memory"); return false; }
+            bf->fields = nf;
+            bf->field_cap = ncap;
+        }
+
+        bf->fields[bf->field_count].name = vname; // already upper
+        bf->fields[bf->field_count].offset = off;
+        bf->fields[bf->field_count].len = len;
+        bf->field_count++;
+
+        off += len;
+
+        skip_ws(p);
+        if (consume(p, ',')) continue;
+        break;
+    }
+
+    // Update string vars to reflect current record buffer
+    field_sync_vars(app, bf);
+    return true;
+}
+
+static bool exec_lset_rset(App *app, Parser *p, int current_line, bool right_justify) {
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) { runtime_error(app, current_line, "Expected variable"); return false; }
+    if (!ident_is_string_var(app, name)) { free(name); runtime_error(app, current_line, "LSET/RSET requires string variable"); return false; }
+
+    skip_ws(p);
+    if (!consume(p, '=')) { free(name); runtime_error(app, current_line, "Expected '='"); return false; }
+
+    char *sv = NULL;
+    if (!parse_string_value(app, p, &sv)) { free(name); runtime_error_or_pending(app, current_line, "Bad string assignment"); return false; }
+
+    // If this variable is FIELD-mapped, write into the record buffer slice
+    BasicFile *bf = NULL;
+    FieldMap *fm = NULL;
+    if (field_lookup(app, name, &bf, &fm) && bf && fm && bf->record_buf) {
+        field_write_slice(bf, fm, sv ? sv : "", right_justify);
+        field_sync_vars(app, bf); // keep vars consistent with buffer
+        free(sv);
+        free(name);
+        return true;
+    }
+
+    // Not field-mapped: behave like normal string assignment
+    Var *v = vars_get_or_create(app, name);
+    v->kind = V_STR;
+    free(v->str);
+    v->str = sv; // take ownership
+    free(name);
+    return true;
+}
+
+
+
+
 
 static bool exec_close(App *app, Parser *p, int current_line) {
     skip_ws(p);
@@ -5939,6 +6846,165 @@ static bool exec_print_file(App *app, Parser *p, int current_line) {
     return true;
 }
 
+/* ---- WRITE / WRITE # ---- */
+
+typedef struct WriteSink {
+    App *app;      /* when to_file == false */
+    FILE *fp;      /* when to_file == true */
+    bool to_file;
+} WriteSink;
+
+static void write_sink_puts(WriteSink *ws, const char *s) {
+    if (!ws || !s) return;
+    if (ws->to_file) {
+        fputs(s, ws->fp);
+    } else {
+        out_append(ws->app, s);
+    }
+}
+
+static void write_sink_putc(WriteSink *ws, int c) {
+    if (!ws) return;
+    if (ws->to_file) {
+        fputc(c, ws->fp);
+    } else {
+        char buf[2];
+        buf[0] = (char)c;
+        buf[1] = 0;
+        out_append(ws->app, buf);
+    }
+}
+
+static void write_emit_quoted_string(WriteSink *ws, const char *s) {
+    /* GW-BASIC WRITE: strings always quoted; internal quotes doubled. */
+    write_sink_putc(ws, '"');
+    const char *p = (s ? s : "");
+    while (*p) {
+        if (*p == '"') {
+            write_sink_putc(ws, '"');
+            write_sink_putc(ws, '"');
+        } else {
+            write_sink_putc(ws, (unsigned char)*p);
+        }
+        p++;
+    }
+    write_sink_putc(ws, '"');
+}
+
+static bool exec_write_common(App *app, WriteSink *ws, Parser *p, int current_line) {
+    (void)app;
+    (void)current_line;
+    if (!p || !ws) return false;
+
+    /* WRITE with no args => newline */
+    skip_ws(p);
+    if (*p->s == 0) {
+        write_sink_putc(ws, '\n');
+        return true;
+    }
+
+    bool need_comma = false;
+
+    for (;;) {
+        skip_ws(p);
+        if (*p->s == 0) break;
+
+        /* Allow empty fields: WRITE ,A  or WRITE , , */
+        if (*p->s == ',' || *p->s == ';') {
+            /* Empty field */
+            if (need_comma) write_sink_putc(ws, ',');
+            /* empty field emits nothing */
+            need_comma = true;
+            p->s++;
+            continue;
+        }
+
+        if (need_comma) write_sink_putc(ws, ',');
+
+        const char *save = p->s;
+        char *sv = NULL;
+        if (parse_string_value(app, p, &sv)) {
+            write_emit_quoted_string(ws, sv);
+            free(sv);
+        } else {
+            p->s = save;
+            double nv = 0.0;
+            if (!parse_expr(app, p, &nv)) return false;
+            char buf[96];
+            double r = round(nv);
+            if (fabs(nv - r) < 1e-12) snprintf(buf, sizeof(buf), "%.0f", r);
+            else snprintf(buf, sizeof(buf), "%.12g", nv);
+            write_sink_puts(ws, buf);
+        }
+
+        need_comma = true;
+
+        skip_ws(p);
+        if (*p->s == ',' || *p->s == ';') {
+            p->s++;
+            continue;
+        }
+        break;
+    }
+
+    write_sink_putc(ws, '\n');
+    return true;
+}
+
+static bool exec_write(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    WriteSink ws;
+    ws.app = app;
+    ws.fp = NULL;
+    ws.to_file = false;
+    return exec_write_common(app, &ws, p, current_line);
+}
+
+static bool exec_write_file(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+
+    skip_ws(p);
+    if (!consume(p, '#')) {
+        runtime_error(app, current_line, "WRITE missing #");
+        return false;
+    }
+
+    double hv = 0.0;
+    if (!parse_expr(app, p, &hv)) {
+        runtime_error(app, current_line, "Bad file handle");
+        return false;
+    }
+    int h = (int)llround(hv);
+
+    if (h <= 0 || h >= BASIC_MAX_FILES) {
+        runtime_error(app, current_line, "Bad file number");
+        return false;
+    }
+
+    BasicFile *bf = file_get(app, h);
+    if (!bf || !bf->fp) {
+        runtime_error(app, current_line, "Bad file number");
+        return false;
+    }
+    if (bf->mode != BF_OUTPUT && bf->mode != BF_APPEND && bf->mode != BF_RANDOM) {
+        /* GW-BASIC: OUTPUT/APPEND are writeable; RANDOM is read/write. */
+        runtime_error(app, current_line, "Bad file mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (consume(p, ',') || consume(p, ';')) { /* ok */ }
+
+    WriteSink ws;
+    ws.app = NULL;
+    ws.fp = bf->fp;
+    ws.to_file = true;
+
+    bool ok = exec_write_common(app, &ws, p, current_line);
+    fflush(bf->fp);
+    return ok;
+}
+
 static void *xmalloc(size_t n) {
     void *p = malloc(n);
     if (!p) {
@@ -5988,6 +7054,26 @@ static char *trim_ws_copy(const char *s) {
     o[n] = 0;
     return o;
 }
+
+
+static char *unescape_doubled_quotes_inner(const char *s) {
+    /* Convert doubled quotes ("") -> " in a WRITE/INPUT-quoted field. */
+    const char *p = (s ? s : "");
+    size_t cap = strlen(p) + 1;
+    char *out = (char*)xmalloc(cap);
+    size_t oi = 0;
+    while (*p) {
+        if (p[0] == '"' && p[1] == '"') {
+            out[oi++] = '"';
+            p += 2;
+            continue;
+        }
+        out[oi++] = *p++;
+    }
+    out[oi] = 0;
+    return out;
+}
+
 
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode) {
     skip_ws(p);
@@ -6077,12 +7163,14 @@ static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mod
             v->kind = V_STR;
             free(v->str);
             size_t L = strlen(field);
-            if (L >= 2 && field[0] == '"' && field[L-1] == '"') {
-                field[L-1] = 0;
-                v->str = xstrdup(field + 1);
-            } else {
-                v->str = xstrdup(field);
-            }
+
+if (L >= 2 && field[0] == '"' && field[L-1] == '"') {
+    field[L-1] = 0;
+    char *un = unescape_doubled_quotes_inner(field + 1);
+    v->str = un; /* takes ownership */
+} else {
+    v->str = xstrdup(field);
+}
         } else {
             v->kind = V_NUM;
             double nv = strtod(field, NULL);
@@ -6112,19 +7200,19 @@ typedef struct InputVarSpec {
 } InputVarSpec;
 
 static bool parse_input_line_fields(const char *line, char ***out_fields, int *out_n) {
-    // Split by commas, honoring quotes (GW-BASIC-ish).
-    // Strictness rules (match GW-BASIC behavior more closely):
-    //  - If any field contains a double quote character, it must be a properly
-    //    quoted field: starts with '"' and ends with '"' (after trimming).
-    //  - No interior quotes are allowed inside a quoted field (GW-BASIC has no escape).
-    //  - Unterminated quoted fields cause a parse failure (caller should '?Redo from start').
+    /* Split by commas, honoring quotes.
+       Strictness (GW-BASIC-ish, tuned for WRITE round-trip):
+         - Unterminated quoted fields => parse failure (?Redo from start).
+         - If a field contains any '"', it must be a quoted field (starts/ends with '"' after trim).
+         - Inside a quoted field, interior quotes must be doubled (""). These are unescaped to a single '"'. */
+
     const char *cur = line ? line : "";
 
     int cap = 8;
     int n = 0;
     char **fields = (char**)xmalloc((size_t)cap * sizeof(char*));
 
-    while (1) {
+    for (;;) {
         bool inq = false;
         const char *start = cur;
         while (*cur) {
@@ -6133,7 +7221,7 @@ static bool parse_input_line_fields(const char *line, char ***out_fields, int *o
             cur++;
         }
 
-        // Unterminated quote: reject the whole input line (GW-BASIC: Redo from start).
+        /* Unterminated quote: reject entire line (GW-BASIC: Redo from start). */
         if (inq && *cur == 0) {
             for (int i = 0; i < n; i++) free(fields[i]);
             free(fields);
@@ -6143,49 +7231,59 @@ static bool parse_input_line_fields(const char *line, char ***out_fields, int *o
         }
 
         const char *end = cur;
-        if (*cur == ',') cur++; // consume comma
+        if (*cur == ',') cur++; /* consume comma */
 
-        // Copy raw field
+        /* Copy + trim raw field */
         size_t L = (size_t)(end - start);
         char *raw = (char*)xmalloc(L + 1);
         memcpy(raw, start, L);
         raw[L] = 0;
-        char *trim = trim_ws_copy(raw);
+        char *field = trim_ws_copy(raw);
         free(raw);
 
-        // Strict quote handling
-        if (strchr(trim, '"')) {
-            size_t tl = strlen(trim);
-            if (tl < 2 || trim[0] != '"' || trim[tl - 1] != '"') {
-                free(trim);
+        /* Strict quote handling + doubled-quote unescape */
+        if (strchr(field, '"')) {
+            size_t tl = strlen(field);
+            if (tl < 2 || field[0] != '"' || field[tl - 1] != '"') {
+                free(field);
                 for (int i = 0; i < n; i++) free(fields[i]);
                 free(fields);
                 *out_fields = NULL;
                 *out_n = 0;
                 return false;
             }
-            // No interior quotes allowed
+
+            char *out = (char*)xmalloc(tl + 1);
+            size_t oi = 0;
             for (size_t i = 1; i + 1 < tl; i++) {
-                if (trim[i] == '"') {
-                    free(trim);
-                    for (int j = 0; j < n; j++) free(fields[j]);
-                    free(fields);
-                    *out_fields = NULL;
-                    *out_n = 0;
-                    return false;
+                char c = field[i];
+                if (c == '"') {
+                    if (i + 1 < tl - 1 && field[i + 1] == '"') {
+                        out[oi++] = '"';
+                        i++; /* consume second quote */
+                    } else {
+                        free(out);
+                        free(field);
+                        for (int j = 0; j < n; j++) free(fields[j]);
+                        free(fields);
+                        *out_fields = NULL;
+                        *out_n = 0;
+                        return false;
+                    }
+                } else {
+                    out[oi++] = c;
                 }
             }
-
-            // Strip outer quotes
-            trim[tl - 1] = 0;
-            memmove(trim, trim + 1, tl - 1);
+            out[oi] = 0;
+            free(field);
+            field = out;
         }
 
         if (n >= cap) {
             cap *= 2;
             fields = (char**)xrealloc(fields, (size_t)cap * sizeof(char*));
         }
-        fields[n++] = trim;
+        fields[n++] = field;
 
         if (*end == 0) break;
     }
@@ -7214,10 +8312,182 @@ static bool exec_return(App *app, int current_line, int *line_idx, int *stmt_idx
     if (fr.kind == GOSUB_RET_KEYTRAP) {
         app->on_key_in_progress = false;
     }
+    if (fr.kind == GOSUB_RET_TIMERTRAP) {
+        app->timer_in_progress = false;
+        /* GW-BASIC: if the handler took longer than the interval, missed ticks do not queue;
+           schedule the next fire from *now* on RETURN. If the handler disabled the trap
+           via TIMER OFF or changed interval/target, respect that. */
+        if (app->timer_enabled && !app->timer_stopped && app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0) {
+            double now = timer_now_sec();
+            timer_schedule_next(app, now);
+        }
+    }
     *line_idx = fr.ret_line_idx;
     *stmt_idx = fr.ret_stmt_idx;
 
     if (fr.ret_chain_text) free(fr.ret_chain_text);
+    return true;
+}
+
+/* ---- ERASE (arrays) ---- */
+static bool exec_erase(App *app, Parser *p, int current_line) {
+    // ERASE name[,name...]
+    // GW-BASIC: only arrays; name must not include subscripts.
+    bool any = false;
+    for (;;) {
+        char *name = NULL;
+        if (!parse_identifier(p, &name)) {
+            if (!any) runtime_error(app, current_line, "Bad ERASE");
+            return false;
+        }
+        any = true;
+
+        skip_ws(p);
+        if (*p->s == '(') {
+            free(name);
+            runtime_error(app, current_line, "Bad ERASE");
+            return false;
+        }
+
+        Var *v = vars_lookup(app, name);
+        if (!v || !v->is_array) {
+            free(name);
+            runtime_error(app, current_line, "Illegal function call");
+            return false;
+        }
+
+        var_erase_array(v);
+        free(name);
+
+        skip_ws(p);
+        if (consume(p, ',')) continue;
+        break;
+    }
+    return true;
+}
+
+/* ---- SWAP (scalars or array elements) ---- */
+typedef struct {
+    Var *v;
+    bool is_str;
+    bool is_arr_elem;
+    int nd;
+    int idx[5];
+    char *name;
+} SwapRef;
+
+static bool parse_swap_ref(App *app, Parser *p, int current_line, SwapRef *out) {
+    memset(out, 0, sizeof(*out));
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) return false;
+    bool is_str = ident_is_string_var(app, name);
+
+    bool is_arr_elem = false;
+    int nd = 0;
+    int idx[5] = {0,0,0,0,0};
+    skip_ws(p);
+    if (consume(p, '(')) {
+        is_arr_elem = true;
+        if (!parse_array_indices(app, p, &nd, idx)) { free(name); runtime_error(app, current_line, "Bad array index"); return false; }
+    }
+
+    Var *v = vars_get_or_create(app, name);
+
+    // GW-BASIC semantics: a bare name (no parentheses) refers to the scalar
+    // variable, even if an array of the same base name exists.
+    // Therefore, do NOT reject SWAP Q,Q when Q() is DIMed; it's a valid scalar SWAP.
+
+    // Auto-dimension undefined arrays like GW-BASIC when an element is referenced.
+    if (is_arr_elem && !v->is_array) {
+        app->option_base_locked = true;
+        int dim_max[5] = {10,10,10,10,10};
+        bool okdim = is_str ? var_define_str_array(v, nd, app->option_base, dim_max)
+                            : var_define_num_array(v, nd, app->option_base, dim_max);
+        if (!okdim) { free(name); runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    out->v = v;
+    out->is_str = is_str;
+    out->is_arr_elem = is_arr_elem;
+    out->nd = nd;
+    memcpy(out->idx, idx, sizeof(idx));
+    out->name = name; // ownership
+    return true;
+}
+
+static void free_swap_ref(SwapRef *r) {
+    if (r && r->name) free(r->name);
+    if (r) r->name = NULL;
+}
+
+static bool exec_swap(App *app, Parser *p, int current_line) {
+    // SWAP a,b
+    SwapRef a = {0}, b = {0};
+    if (!parse_swap_ref(app, p, current_line, &a)) { runtime_error(app, current_line, "Bad SWAP"); return false; }
+    skip_ws(p);
+    if (!consume(p, ',')) { free_swap_ref(&a); runtime_error(app, current_line, "Bad SWAP"); return false; }
+    if (!parse_swap_ref(app, p, current_line, &b)) { free_swap_ref(&a); runtime_error(app, current_line, "Bad SWAP"); return false; }
+
+    if (a.is_str != b.is_str) {
+        free_swap_ref(&a); free_swap_ref(&b);
+        runtime_error(app, current_line, "Type mismatch");
+        return false;
+    }
+
+    if (a.is_str) {
+        char **pa = NULL;
+        char **pb = NULL;
+        if (a.is_arr_elem) {
+            if (!a.v->is_array || !a.v->sarr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offa = 0;
+            if (!array_calc_offset(a.v, a.nd, a.idx, &offa)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pa = &a.v->sarr[offa];
+            if (!*pa) *pa = xstrdup("");
+        } else {
+            pa = &a.v->str;
+            if (!*pa) *pa = xstrdup("");
+        }
+        if (b.is_arr_elem) {
+            if (!b.v->is_array || !b.v->sarr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offb = 0;
+            if (!array_calc_offset(b.v, b.nd, b.idx, &offb)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pb = &b.v->sarr[offb];
+            if (!*pb) *pb = xstrdup("");
+        } else {
+            pb = &b.v->str;
+            if (!*pb) *pb = xstrdup("");
+        }
+
+        char *tmp = *pa;
+        *pa = *pb;
+        *pb = tmp;
+    } else {
+        double *pa = NULL;
+        double *pb = NULL;
+        if (a.is_arr_elem) {
+            if (!a.v->is_array || !a.v->arr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offa = 0;
+            if (!array_calc_offset(a.v, a.nd, a.idx, &offa)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pa = &a.v->arr[offa];
+        } else {
+            pa = &a.v->num;
+        }
+        if (b.is_arr_elem) {
+            if (!b.v->is_array || !b.v->arr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offb = 0;
+            if (!array_calc_offset(b.v, b.nd, b.idx, &offb)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pb = &b.v->arr[offb];
+        } else {
+            pb = &b.v->num;
+        }
+
+        double tmp = *pa;
+        *pa = *pb;
+        *pb = tmp;
+    }
+
+    free_swap_ref(&a);
+    free_swap_ref(&b);
     return true;
 }
 
@@ -7649,7 +8919,15 @@ if (starts_ci(s, "READ") && is_word_boundary(s[4])) {
             }
         } else {
             // numeric target
-            if (di.quoted) { free(name); free(tmp); runtime_error(app, current_line, "Type mismatch"); return false; }
+            // GW-BASIC: blank numeric DATA items (including trailing comma) read as 0.
+            // If our DATA parser marked an empty item as quoted (e.g., ""), be permissive and treat "" as 0 too.
+            if (di.quoted) {
+                const char *qt = di.text ? di.text : "";
+                Parser qp = { qt };
+                skip_ws(&qp);
+                if (*qp.s != 0) { free(name); free(tmp); runtime_error(app, current_line, "Type mismatch"); return false; }
+                // quoted-but-empty -> 0
+            }
 
             double nv = 0.0;
             // empty numeric DATA item -> 0 (GW-BASIC behavior)
@@ -7856,8 +9134,9 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
         return false; // abort execution cleanly
     }
 
-// END
+// END / SYSTEM  (GW-BASIC: SYSTEM exits to DOS; WBASIC treats SYSTEM as END for compatibility)
     if (starts_ci(s, "END") && is_word_boundary(s[3])) { free(tmp); return false; }
+    if (starts_ci(s, "SYSTEM") && is_word_boundary(s[6])) { free(tmp); return false; }
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
@@ -7951,7 +9230,58 @@ if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
         return ok;
     }
 
-    // CLOSE
+    
+
+
+
+// FIELD #n, ...  (RANDOM)
+if (starts_ci(s, "FIELD") && is_word_boundary(s[5])) {
+    Parser p = { s + 5 };
+    bool ok = exec_field(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// LSET var$ = expr$
+if (starts_ci(s, "LSET") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_lset_rset(app, &p, current_line, false);
+    free(tmp);
+    return ok;
+}
+
+// RSET var$ = expr$
+if (starts_ci(s, "RSET") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_lset_rset(app, &p, current_line, true);
+    free(tmp);
+    return ok;
+}
+
+// GET #n, rec  (RANDOM)
+if (starts_ci(s, "GET") && is_word_boundary(s[3])) {
+    Parser p = { s + 3 };
+    bool ok = exec_get(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// PUT #n, rec  (RANDOM)
+if (starts_ci(s, "PUT") && is_word_boundary(s[3])) {
+    Parser p = { s + 3 };
+    bool ok = exec_put(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+// SEEK #n, pos
+if (starts_ci(s, "SEEK") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_seek(app, &p, current_line);
+    free(tmp);
+    return ok;
+}
+
+// CLOSE
     if (starts_ci(s, "CLOSE") && is_word_boundary(s[5])) {
         Parser p = { s + 5 };
         bool ok = exec_close(app, &p, current_line);
@@ -7959,7 +9289,22 @@ if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
         return ok;
     }
 
-    // LINE INPUT (file only): LINE INPUT #n, A$
+    
+    // LINE INPUT (keyboard): LINE INPUT A$
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (starts_ci(t, "INPUT") && is_word_boundary(t[5])) {
+            Parser p2 = { t + 5 };
+            skip_ws(&p2);
+            if (*p2.s != '#') {
+                bool ok = exec_input(app, &p2, current_line);
+                free(tmp);
+                return ok;
+            }
+        }
+    }
+// LINE INPUT (file only): LINE INPUT #n, A$
     if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
         char *t = s + 4;
         while (*t && isspace((unsigned char)*t)) t++;
@@ -8013,7 +9358,23 @@ if (starts_ci(s, "COLOR") && is_word_boundary(s[5])) {
         return ok;
     }
 
-    // PRINT
+    
+// WRITE
+if (starts_ci(s, "WRITE") && is_word_boundary(s[5])) {
+    Parser p = { s + 5 };
+    skip_ws(&p);
+    if (*p.s == '#') {
+        bool ok = exec_write_file(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    bool ok = exec_write(app, &p, current_line);
+    if (!ok) runtime_error_or_pending(app, current_line, "Bad WRITE");
+    free(tmp);
+    return ok;
+}
+
+// PRINT
     if (starts_ci(s, "PRINT") && is_word_boundary(s[5])) {
         Parser p = { s + 5 };
         skip_ws(&p);
@@ -8067,6 +9428,56 @@ if (starts_ci(s, "COLOR") && is_word_boundary(s[5])) {
         free(tmp);
         return ok;
     }
+
+    // ERASE
+    if (starts_ci(s, "ERASE") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_erase(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+
+    // SWAP
+    if (starts_ci(s, "SWAP") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_swap(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+
+    // TIMER ON | TIMER OFF | TIMER STOP  (GW-BASIC event control for ON TIMER)
+    if (starts_ci(s, "TIMER") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        skip_ws(&p);
+        if (starts_ci(p.s, "ON") && is_word_boundary(p.s[2])) {
+            p.s += 2; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_enabled = true;
+            app->timer_stopped = false;
+            if (app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0) timer_schedule_next(app, timer_now_sec());
+            free(tmp);
+            return true;
+        }
+        if (starts_ci(p.s, "OFF") && is_word_boundary(p.s[3])) {
+            p.s += 3; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_enabled = false;
+            app->timer_stopped = false;
+            free(tmp);
+            return true;
+        }
+        if (starts_ci(p.s, "STOP") && is_word_boundary(p.s[4])) {
+            p.s += 4; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_stopped = true;
+            free(tmp);
+            return true;
+        }
+        runtime_error(app, current_line, "Syntax error");
+        free(tmp);
+        return false;
+    }
+
 
 
     
@@ -8126,9 +9537,50 @@ if (starts_ci(s, "COLOR") && is_word_boundary(s[5])) {
             free(tmp);
             return true;
         }
+
+
+        // ON TIMER(interval) GOSUB <line>
+        if (starts_ci(p.s, "TIMER") && is_word_boundary(p.s[5])) {
+            p.s += 5;
+            skip_ws(&p);
+            if (!consume(&p, '(')) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            double interval = 0.0;
+            if (!parse_expr(app, &p, &interval)) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            skip_ws(&p);
+            if (!consume(&p, ')')) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            skip_ws(&p);
+            if (!starts_ci(p.s, "GOSUB") || !is_word_boundary(p.s[5])) { runtime_error(app, current_line, "ON TIMER expects GOSUB"); free(tmp); return false; }
+            p.s += 5;
+            skip_ws(&p);
+            double ln = 0.0;
+            if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "ON TIMER expects line number"); free(tmp); return false; }
+            int target_line = (int)llround(ln);
+            skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+
+            if (target_line <= 0) {
+                // Disable
+                app->on_timer_gosub_line = 0;
+                app->on_timer_interval = 0.0;
+                app->timer_enabled = false;
+                app->timer_stopped = false;
+                app->timer_in_progress = false;
+                app->timer_next_fire = 0.0;
+                free(tmp);
+                return true;
+            }
+
+            // Arm (but do not implicitly enable; requires TIMER ON like GW-BASIC)
+            int idx = program_find_index(&app->prog, target_line);
+            if (idx < 0) { runtime_error(app, current_line, "ON TIMER target not found"); free(tmp); return false; }
+            app->on_timer_gosub_line = target_line;
+            app->on_timer_interval = interval;
+            /* next fire scheduled on RETURN from handler (no queued ticks) */
+            free(tmp);
+            return true;
+        }
     }
 
-    
 // RESUME [<line>] | RESUME NEXT  (Phase 3: implement RESUME NEXT in addition to plain RESUME and RESUME <line>)
 if (starts_ci(s, "RESUME") && is_word_boundary(s[6])) {
     Parser p = { s + 6 };
@@ -9068,6 +10520,35 @@ if (app->key_trap_enabled && app->runtime_key_macro && app->runtime_key_macro[0]
     g_free(app->runtime_key_macro);
     app->runtime_key_macro = NULL;
 }
+
+        /* If an ON TIMER(interval) GOSUB trap is armed, dispatch it at this safe point.
+           GW-BASIC semantics: no re-entrancy; firing is best-effort at statement boundaries. */
+        if (app->timer_enabled && !app->timer_stopped && app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0 && !app->timer_in_progress) {
+            double now = timer_now_sec();
+            if (timer_reached(now, app->timer_next_fire)) {
+                int idx = program_find_index(&app->prog, app->on_timer_gosub_line);
+                if (idx >= 0) {
+                    if (app->gosub_sp >= 128) { runtime_error(app, current_line, "GOSUB stack overflow"); }
+                    else {
+                        app->gosub_stack[app->gosub_sp++] = (GosubFrame){
+                            .kind = GOSUB_RET_TIMERTRAP,
+                            .ret_line_idx = line_idx,
+                            .ret_stmt_idx = stmt_idx,
+                            .ret_chain_next_si = 0,
+                            .ret_chain_text = NULL,
+                        };
+                        app->timer_in_progress = true;
+                        /* next fire scheduled on RETURN from handler (no queued ticks) */
+                        line_idx = idx;
+                        stmt_idx = 0;
+                        continue;
+                    }
+                } else {
+                    // If the handler line doesn't exist, disable the trap to avoid looping.
+                    app->on_timer_gosub_line = 0;
+                }
+            }
+        }
 
         StmtList sl = split_statements(app->prog.lines[line_idx].text);
 
@@ -10335,7 +11816,7 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "February 3, 2026";
+const char *about_line3 = "February 5, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
@@ -10544,6 +12025,51 @@ static void input_echo_update(App *app, const char *txt) {
     /* Leave cursor at end of echoed input (terminal-like). */
     (void)save_r; (void)save_c;
 }
+
+/* INPUT$(n) keyboard read (Phase: Binary I/O Tier-1)
+   NOTE: In GTK UI builds, this uses the existing terminal-style input line mechanism
+   (waits for Enter) and returns the first N chars of the entered line.
+*/
+static char *inputdollar_read_keyboard(App *app, int n, int current_line) {
+    if (n <= 0) return xstrdup("");
+#ifdef WBASIC_NO_UI
+    char *buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { runtime_error(app, current_line, "Out of memory"); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, stdin);
+    buf[got] = 0;
+    return buf;
+#else
+    if (!app) return xstrdup("");
+
+    app->input_waiting = true;
+    app->input_ready = false;
+    if (app->input_line) { g_free(app->input_line); app->input_line = NULL; }
+
+    if (app->cmd_entry) gtk_widget_grab_focus(app->cmd_entry);
+
+    set_run_state(app, RUN_WAITING);
+    input_echo_update(app, "");
+
+    while (!app->input_ready && !app->stop_flag && !app->quitting) {
+        ui_pump_raw(app);
+        ui_delay_ms(app, 5);
+    }
+
+    app->input_waiting = false;
+    if (app->stop_flag || app->quitting) return xstrdup("");
+
+    const char *line = app->input_line ? app->input_line : "";
+    size_t L = strlen(line);
+    if ((size_t)n > L) n = (int)L;
+    char *out = (char*)malloc((size_t)n + 1);
+    if (!out) { runtime_error(app, current_line, "Out of memory"); return NULL; }
+    memcpy(out, line, (size_t)n);
+    out[n] = 0;
+    return out;
+#endif
+}
+
+
 
 #ifndef WBASIC_NO_UI
 static void on_cmd_changed(GtkEditable *editable, gpointer user_data) {
@@ -11876,3 +13402,4 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
+

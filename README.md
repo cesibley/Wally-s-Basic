@@ -1,13 +1,15 @@
 # Wally's Basic (WBASIC)
 
+This branch has new features not yet fully tested or merged to main branch
+
 WBASIC is a GW-BASIC–style interpreter with a GTK3 user interface, focused on
 faithful classic BASIC behavior and a portable C codebase.  Currently text
-only.  Graphic commands are in planning.  
+only.  Graphic commands are in planning.
 
 The project is primarily for Linux and requires GTK and Glib.  It does compile and run under Windows with MSYS2, but it is not as fully tested.
 
 ## Version
-**1.07** — February 3, 2026
+**1.11** — February 5, 2026
 
 ## Features
 - GW-BASIC–style syntax and semantics
@@ -49,3 +51,7 @@ See the `demo/` directory for example BASIC programs
 
 ## License
 MIT License
+
+
+## Documentation
+- `docs/BINARY_IO_PLAN.md` — Binary / Random-access I/O implementation plan (Phase 0 scope & rules)

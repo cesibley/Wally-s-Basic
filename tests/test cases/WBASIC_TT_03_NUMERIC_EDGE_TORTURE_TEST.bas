@@ -1,0 +1,94 @@
+10 REM ============================================================
+20 REM NUMERIC EDGE TORTURE TEST (GW-BASIC strict) - v2
+30 REM Fix: integer tests use integer vars (no float compare noise)
+40 REM Float tests use tolerance.
+50 REM No block IF. Unique line numbers.
+60 REM ============================================================
+70 DEFINT A-Z
+80 PASS=0:FAIL=0
+90 EPS!=.0001
+
+100 PRINT "Running NUMERIC edge torture test..."
+110 PRINT
+120 ON ERROR GOTO 9000
+
+200 PRINT "TEST1: INT / FIX / SGN basics"
+210 GI=INT( 3.9): EI=3: DESC$="INT(3.9)=3": GOSUB 8200
+220 GI=INT(-3.1): EI=-4: DESC$="INT(-3.1)=-4": GOSUB 8200
+230 GI=FIX( 3.9): EI=3: DESC$="FIX(3.9)=3": GOSUB 8200
+240 GI=FIX(-3.9): EI=-3: DESC$="FIX(-3.9)=-3": GOSUB 8200
+250 GI=SGN(0): EI=0: DESC$="SGN(0)=0": GOSUB 8200
+260 GI=SGN(5): EI=1: DESC$="SGN(5)=1": GOSUB 8200
+270 GI=SGN(-5): EI=-1: DESC$="SGN(-5)=-1": GOSUB 8200
+
+300 PRINT "TEST2: MOD semantics (sign rules)"
+310 GI= 5 MOD 2: EI=1: DESC$="5 MOD 2 = 1": GOSUB 8200
+320 GI= 5 MOD -2: EI=1: DESC$="5 MOD -2 = 1": GOSUB 8200
+330 GI=-5 MOD 2: EI=-1: DESC$="-5 MOD 2 = -1": GOSUB 8200
+340 GI=-5 MOD -2: EI=-1: DESC$="-5 MOD -2 = -1": GOSUB 8200
+
+400 PRINT "TEST3: Integer division (\\) semantics"
+410 GI= 5\2: EI=2: DESC$="5\\2=2": GOSUB 8200
+420 GI=-5\2: EI=-2: DESC$="-5\\2=-2": GOSUB 8200
+430 GI= 5\-2: EI=-2: DESC$="5\\-2=-2": GOSUB 8200
+440 GI=-5\-2: EI=2: DESC$="-5\\-2=2": GOSUB 8200
+
+500 PRINT "TEST4: Unary minus vs exponent precedence"
+510 GI= -2^2: EI=-4: DESC$="-2^2 = -4": GOSUB 8200
+520 GI= (-2)^2: EI=4: DESC$="(-2)^2 = 4": GOSUB 8200
+530 GI= -(2^3): EI=-8: DESC$="-(2^3)=-8": GOSUB 8200
+
+600 PRINT "TEST5: Relational results are -1 (true) / 0 (false)"
+610 GI=(5>3): EI=-1: DESC$="(5>3)=-1": GOSUB 8200
+620 GI=(3>5): EI=0: DESC$="(3>5)=0": GOSUB 8200
+630 GI=(5=5): EI=-1: DESC$="(5=5)=-1": GOSUB 8200
+640 GI=(5<>5): EI=0: DESC$="(5<>5)=0": GOSUB 8200
+
+700 PRINT "TEST6: NOT truth-table sanity"
+710 GI=NOT 0: EI=-1: DESC$="NOT 0 = -1": GOSUB 8200
+720 GI=NOT -1: EI=0: DESC$="NOT -1 = 0": GOSUB 8200
+730 GI=NOT 1: EI=-2: DESC$="NOT 1 = -2": GOSUB 8200
+740 GI=NOT 5: EI=-6: DESC$="NOT 5 = -6": GOSUB 8200
+
+800 PRINT "TEST7: AND / OR / XOR bitwise identities"
+810 GI=(5 AND 3): EI=1: DESC$="5 AND 3 = 1": GOSUB 8200
+820 GI=(5 OR 2): EI=7: DESC$="5 OR 2 = 7": GOSUB 8200
+830 GI=(5 XOR 1): EI=4: DESC$="5 XOR 1 = 4": GOSUB 8200
+
+900 PRINT "TEST8: Float tolerance comparisons"
+910 A!=1/10
+920 GF!=A!*10: EF!=1: DESC$="(1/10)*10 ~= 1": GOSUB 8300
+930 GF!=(0.1+0.2): EF!=0.3: DESC$="0.1+0.2 ~= 0.3": GOSUB 8300
+
+1000 PRINT "TEST9: Division by zero traps (ERR=11) and ERL points to /0 line"
+1010 ON ERROR GOTO 1050
+1020 EXPECTING=1: EXP_ERR=11: EXP_ERL=1030: XMSG$="DIV/0 should trap ERR=11"
+1030 Z=1/0
+1040 FAIL=FAIL+1: PRINT "FAIL: DIV/0 did not error"
+1045 GOTO 1070
+1050 IF EXPECTING=1 THEN GOTO 1060
+1055 GOTO 9000
+1060 IF ERR=EXP_ERR AND ERL=EXP_ERL THEN PASS=PASS+1 ELSE FAIL=FAIL+1: PRINT "FAIL:";XMSG$;" expected ERR=";EXP_ERR;" ERL=";EXP_ERL;" got ERR=";ERR;" ERL=";ERL
+1065 EXPECTING=0: ERR=0
+1066 RESUME 1070
+1070 ON ERROR GOTO 9000
+
+1100 PRINT
+1110 PRINT "=================================="
+1120 PRINT "NUMERIC EDGE TORTURE TEST COMPLETE"
+1130 PRINT "PASS=";PASS;" FAIL=";FAIL
+1140 PRINT "=================================="
+1150 END
+
+8200 REM exact integer compare
+8210 IF GI=EI THEN PASS=PASS+1 ELSE FAIL=FAIL+1: PRINT "FAIL:";DESC$;" EXPECT=";EI;" GOT=";GI
+8220 RETURN
+
+8300 REM float tolerance compare
+8310 DIF!=GF!-EF!
+8320 IF DIF!<0 THEN DIF!=-DIF!
+8330 IF DIF!<=EPS! THEN PASS=PASS+1 ELSE FAIL=FAIL+1: PRINT "FAIL:";DESC$;" EXPECT~=";EF!;" GOT=";GF!
+8340 RETURN
+
+9000 PRINT "UNEXPECTED ERROR: ERR=";ERR;" ERL=";ERL
+9010 END
