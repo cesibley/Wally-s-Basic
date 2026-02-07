@@ -52,6 +52,3 @@ See the `demo/` directory for example BASIC programs
 ## License
 MIT License
 
-
-## Documentation
-- `docs/BINARY_IO_PLAN.md` — Binary / Random-access I/O implementation plan (Phase 0 scope & rules)
