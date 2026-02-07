@@ -20,7 +20,7 @@
   - Fixed MOD operator sign rules to match GW-BASIC.
   - Ensured mixed numeric/string expression errors report correct ERR/ERL.
 
-  DATA / READ / RESTORE
+- DATA / READ / RESTORE
   - Fixed DATA stream ordering to be static and independent of control flow.
   - Ensured DATA inside skipped IF, GOTO, GOSUB, FOR, and unreachable code is still counted.
   - Fixed DATA in loops being counted once, not per iteration.
