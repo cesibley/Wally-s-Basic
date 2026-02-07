@@ -1,4 +1,19 @@
+#include <termios.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
+
+
+/* Optional embedded icon support.
+ * If you link an object produced from `ld -r -b binary icon.png`, these symbols will exist.
+ * Otherwise they will be NULL (weak) and we simply skip setting the window icon.
+ */
+#if !defined(WBASIC_NO_UI)
+extern const unsigned char _binary_icon_png_start[] __attribute__((weak));
+extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
+#endif
 
 /*
  * WBASIC — GW-BASIC–style interpreter with GTK UI
@@ -305,6 +320,11 @@ extern const unsigned int  _binary_icon_png_size;
 #ifndef WBASIC_NO_UI
 /* Load embedded PNG icon into a GdkPixbuf without deprecated APIs. */
 static GdkPixbuf *ui_load_wbasic_icon_pixbuf(void) {
+    if ((const void*)_binary_icon_png_start == NULL || (const void*)_binary_icon_png_end == NULL) return NULL;
+    const unsigned char *start = _binary_icon_png_start;
+    const unsigned char *end   = _binary_icon_png_end;
+    if (!start || !end || end <= start) return NULL;
+
     GBytes *bytes = g_bytes_new_static(_binary_icon_png_start, (gsize)(_binary_icon_png_end - _binary_icon_png_start));
     GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
     GError *err = NULL;
@@ -856,7 +876,8 @@ typedef struct App {
     RunState run_state;
     bool inkey_ready;
     char inkey_char;
-#ifdef WBASIC_NO_UI
+
+    /* Headless (CLI) terminal I/O state. Present in unified builds too. */
     int headless_tty_fd;
 #ifdef _WIN32
     void *headless_tty_old;
@@ -866,7 +887,7 @@ typedef struct App {
     bool headless_tty_inited;
     bool headless_tty_using_stdin;
     bool headless_cursor_dirty; /* legacy safety net: LOCATE now moves cursor immediately */
-#endif
+
 
     /* UI helper: last executing BASIC line number (used for PAUSE/STOP jump) */
     int ui_last_exec_line;
@@ -1119,8 +1140,14 @@ GosubFrame gosub_stack[128];
    - COLOR with no arguments emits reset (\x1b[0m) immediately and restores defaults (cur_fg/cur_bg = 16).
 */
 
+#ifndef WBASIC_HAS_HEADLESS_STDOUT_IS_TTY
+#define WBASIC_HAS_HEADLESS_STDOUT_IS_TTY 1
+static bool headless_stdout_is_tty(void) {
+    return isatty(fileno(stdout));
+}
+#endif
+
 /* Forward decls for headless ANSI helpers (defined later in this file). */
-static inline bool headless_stdout_is_tty(void);
 static inline void headless_ansi_move(int row, int col);
 static inline void headless_ansi_color_cache_reset(void);
 static inline void headless_ansi_apply_color(int fg, int bg);
@@ -2211,9 +2238,6 @@ static void screen_render(App *app) { (void)app; }
 
 #ifdef WBASIC_NO_UI
 // Headless terminal helpers (TTY only): use ANSI escape sequences for CLS/LOCATE/COLOR fidelity.
-static inline bool headless_stdout_is_tty(void) {
-    return isatty(fileno(stdout));
-}
 static inline void headless_ansi_move(int row, int col) {
     if (row < 1) row = 1;
     if (col < 1) col = 1;
@@ -4521,7 +4545,7 @@ static bool eval_condition(App *app, Parser *p, bool *out) {
 }
 
 
-#if defined(WBASIC_NO_UI) && defined(_WIN32)
+#if defined(_WIN32)
 static void headless_tty_init(App *app) {
     if (!app || app->headless_tty_inited) return;
     app->headless_tty_fd = -1;
@@ -4536,11 +4560,18 @@ static void headless_tty_shutdown(App *app) {
     app->headless_tty_using_stdin = false;
 }
 
-static void headless_try_read_inkey(App *app) {
+static __attribute__((unused)) void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
 }
-#elif defined(WBASIC_NO_UI) && !defined(_WIN32)
+#else /* !_WIN32 */
 static void do_stop(App *app);
+
+#ifndef WBASIC_HAS_HEADLESS_STDOUT_IS_TTY
+#define WBASIC_HAS_HEADLESS_STDOUT_IS_TTY 1
+static bool headless_stdout_is_tty(void) {
+    return isatty(fileno(stdout));
+}
+#endif
 
 static void headless_tty_init(App *app) {
     if (!app || app->headless_tty_inited) return;
@@ -4584,7 +4615,7 @@ static void headless_tty_shutdown(App *app) {
     app->headless_tty_using_stdin = false;
 }
 
-static void headless_try_read_inkey(App *app) {
+static __attribute__((unused)) void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
     headless_tty_init(app);
 
@@ -12765,8 +12796,9 @@ if (out_buildlog) {
 }
 
 /* Embedded runner entrypoint used by exported standalone programs. */
-int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
-#ifdef WBASIC_NO_UI
+
+/* Run BASIC source text in headless CLI mode (no GTK). */
+static int wbasic_run_headless_from_text(int argc, char **argv, const char *source_text) {
     App app;
     memset(&app, 0, sizeof(app));
 
@@ -12777,10 +12809,6 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     /* Phase 3: PRINT-statement throttling tickle (UI pumps only during delays). */
     app.tickle.fn = NULL;
     app.tickle.user = NULL;
-#ifndef WBASIC_NO_UI
-    app.tickle.fn = wbasic_ui_tickle;
-    app.tickle.user = &app;
-#endif
     app.embedded_text = source_text ? source_text : "";
 
 #ifdef WBASIC_EMBEDDED_OUTPUT_SPEED_0_100
@@ -12882,6 +12910,11 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     free(app.screen_fg);
     free(app.screen_bg);
     return 0;
+}
+
+int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
+#ifdef WBASIC_NO_UI
+    return wbasic_run_headless_from_text(argc, argv, source_text);
 #else
     /* Use caller-provided argc/argv to keep GTK/GLib argument parsing happy. */
     if (argc <= 0 || argv == NULL || argv[0] == NULL) {
@@ -13095,7 +13128,80 @@ int wbasic_main(int argc, char **argv) {
         return 0;
     }
 
-    gtk_init(&argc, &argv);
+    
+    /* Unified binary experiment: allow --cli/--headless to run in terminal mode. */
+    bool want_cli = false;
+    bool force_gtk = false;
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (!strcmp(argv[i], "--cli") || !strcmp(argv[i], "--headless") || !strcmp(argv[i], "-C")) want_cli = true;
+        if (!strcmp(argv[i], "--gtk")) force_gtk = true;
+    }
+
+#ifndef _WIN32
+    /* Auto-fallback: if no GUI display is available, default to CLI unless --gtk forced. */
+    if (!want_cli && !force_gtk) {
+        const char *disp = getenv("DISPLAY");
+        const char *wdisp = getenv("WAYLAND_DISPLAY");
+        if ((!disp || !*disp) && (!wdisp || !*wdisp)) want_cli = true;
+    }
+#endif
+
+    if (want_cli) {
+        /* CLI mode: wbasic --cli <file.bas> [-s N] */
+        if (argc < 2) {
+            fprintf(stderr,
+                    "Usage: %s [--cli|--headless] <file.bas> [-s N]\n"
+                    "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n"
+                    "  -h, --help                   Show help.\n",
+                    (argc > 0 && argv[0]) ? argv[0] : "wbasic");
+            return 1;
+        }
+
+        const char *in_bas = NULL;
+        for (int i = 1; i < argc; i++) {
+            const char *a = argv[i];
+            if (!a) continue;
+            if (a[0] == '-') {
+                if (!strcmp(a, "-s") || !strcmp(a, "--speed")) { i++; continue; }
+                continue;
+            }
+            in_bas = a;
+            break;
+        }
+
+        if (!in_bas) {
+            fprintf(stderr, "No input .bas file provided.\n");
+            return 1;
+        }
+
+        gchar *contents = NULL;
+        gsize len = 0;
+        if (!g_file_get_contents(in_bas, &contents, &len, NULL) || !contents) {
+            fprintf(stderr, "Failed to read: %s\n", in_bas);
+            return 1;
+        }
+
+        /* Strip the input filename and --cli/--headless/--gtk from argv before calling runner. */
+        char *argv2[256];
+        int argc2 = 0;
+        argv2[argc2++] = argv[0];
+        for (int i = 1; i < argc && argc2 < 255; i++) {
+            const char *a = argv[i];
+            if (!a) continue;
+            if (in_bas && !strcmp(a, in_bas)) continue;
+            if (!strcmp(a, "--cli") || !strcmp(a, "--headless") || !strcmp(a, "-C")) continue;
+            if (!strcmp(a, "--gtk")) continue;
+            argv2[argc2++] = argv[i];
+        }
+        argv2[argc2] = NULL;
+
+        int rc = wbasic_run_headless_from_text(argc2, argv2, contents);
+        g_free(contents);
+        return rc;
+    }
+
+gtk_init(&argc, &argv);
     apply_windows_dark_mode_preference();
 
     const char *startup_file = NULL;
