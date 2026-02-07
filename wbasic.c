@@ -590,7 +590,7 @@ static char *xstrdup(const char *s) {
 
 #include <ctype.h>
 #include <time.h>
-#if defined(WBASIC_NO_UI) && !defined(_WIN32)
+#if !defined(_WIN32)
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -620,6 +620,9 @@ static void print_usage(const char *prog)
     fprintf(stderr, "Usage: %s [-r] [program.bas]\n", prog);
     fprintf(stderr, "If a BASIC program file is provided, WBASIC will load it on startup.\n");
     fprintf(stderr, "  -r          Load and RUN the program automatically.\n");
+    fprintf(stderr, "  -c, --cli   Run in terminal/CLI mode (no GTK UI).\n");
+    fprintf(stderr, "      --headless  Alias for --cli.\n");
+    fprintf(stderr, "      --gtk       Force GTK UI (do not auto-fallback to CLI).\n");
     fprintf(stderr, "  -h, --help  Show this help and exit.\n");
 #endif
 }
@@ -4550,6 +4553,8 @@ static bool eval_condition(App *app, Parser *p, bool *out) {
 
 
 #if defined(_WIN32)
+static void headless_try_read_inkey(App *app);
+
 static void headless_tty_init(App *app) {
     if (!app || app->headless_tty_inited) return;
     app->headless_tty_fd = -1;
@@ -4564,7 +4569,7 @@ static void headless_tty_shutdown(App *app) {
     app->headless_tty_using_stdin = false;
 }
 
-static __attribute__((unused)) void headless_try_read_inkey(App *app) {
+static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
 }
 #else /* !_WIN32 */
@@ -4619,7 +4624,7 @@ static void headless_tty_shutdown(App *app) {
     app->headless_tty_using_stdin = false;
 }
 
-static __attribute__((unused)) void headless_try_read_inkey(App *app) {
+static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
     headless_tty_init(app);
 
@@ -4714,9 +4719,7 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
-#ifdef WBASIC_NO_UI
-            headless_try_read_inkey(app);
-#endif
+            if (!wbasic_ui_active(app)) headless_try_read_inkey(app);
             if (app->inkey_ready) {
                 char buf[2] = { app->inkey_char, 0 };
                 *out = xstrdup(buf);
@@ -13139,7 +13142,7 @@ int wbasic_main(int argc, char **argv) {
     bool force_gtk = false;
     for (int i = 1; i < argc; i++) {
         if (!argv[i]) continue;
-        if (!strcmp(argv[i], "--cli") || !strcmp(argv[i], "--headless") || !strcmp(argv[i], "-C")) want_cli = true;
+        if (!strcmp(argv[i], "--cli") || !strcmp(argv[i], "--headless") || !strcmp(argv[i], "-c") || !strcmp(argv[i], "-C")) want_cli = true;
         if (!strcmp(argv[i], "--gtk")) force_gtk = true;
     }
 
@@ -13195,7 +13198,7 @@ int wbasic_main(int argc, char **argv) {
             const char *a = argv[i];
             if (!a) continue;
             if (in_bas && !strcmp(a, in_bas)) continue;
-            if (!strcmp(a, "--cli") || !strcmp(a, "--headless") || !strcmp(a, "-C")) continue;
+            if (!strcmp(a, "--cli") || !strcmp(a, "--headless") || !strcmp(a, "-c") || !strcmp(a, "-C")) continue;
             if (!strcmp(a, "--gtk")) continue;
             argv2[argc2++] = argv[i];
         }
