@@ -786,6 +786,8 @@ typedef enum {
     GOSUB_RET_CHAIN  = 1    // return into an in-progress ':' statement chain
     ,
     GOSUB_RET_KEYTRAP = 2 // return to (line_idx, stmt_idx) and clear ON KEY in-progress flag
+    ,
+    GOSUB_RET_TIMERTRAP = 3 // return to (line_idx, stmt_idx) and clear ON TIMER in-progress flag
 } GosubRetKind;
 
 typedef struct {
@@ -866,6 +868,15 @@ char *key_macros[10];               // KEY 1..10 strings (NULL = unassigned)
     bool on_key_in_progress;           // reentrancy guard for ON KEY trap
 
     char *runtime_key_macro;            // pending macro to execute in RUN context (owned)
+
+    // ON TIMER(interval) GOSUB trap (GW-BASIC style)
+    double on_timer_interval;           // seconds (0 = unset)
+    int    on_timer_gosub_line;         // BASIC line number target (0 = unset/disabled)
+    bool   timer_enabled;              // TIMER ON/OFF
+    bool   timer_stopped;              // TIMER STOP (pauses)
+    double timer_next_fire;            // next scheduled fire time (TIMER seconds)
+    bool   timer_in_progress;          // reentrancy guard for ON TIMER trap
+
 char *pending_key_macro;            // queued macro to execute (owned)
 bool pending_key_macro_scheduled;   // idle callback scheduled
     char *pending_load_path;   // deferred LOAD path when requested while running
@@ -1638,6 +1649,37 @@ static void ui_delay_ms(App *app, int ms) {
     }
 }
 #endif
+
+/* ---- TIMER event support (GW-BASIC ON TIMER / TIMER ON|OFF|STOP) ---- */
+static double timer_now_sec(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    struct tm lt;
+    time_t t = tv.tv_sec;
+#ifdef _WIN32
+    localtime_s(&lt, &t);
+#else
+    localtime_r(&t, &lt);
+#endif
+    return (double)(lt.tm_hour*3600 + lt.tm_min*60 + lt.tm_sec) + (double)tv.tv_usec/1e6;
+}
+
+/* Midnight wrap-safe: return true if now has reached or passed target, assuming target was set based on timer_now_sec(). */
+static bool timer_reached(double now, double target) {
+    // TIMER wraps at 86400 seconds.
+    const double DAY = 86400.0;
+    double d = now - target;
+    if (d >= 0.0 && d < DAY/2) return true;
+    // Handle wrap: if target is near end of day and now is small.
+    if (d < -DAY/2) return true;
+    return false;
+}
+
+static void timer_schedule_next(App *app, double now) {
+    if (!app || app->on_timer_interval <= 0.0) return;
+    double next = now + app->on_timer_interval;
+    if (next >= 86400.0) next -= 86400.0;
+    app->timer_next_fire = next;
+}
 
 
 #ifndef WBASIC_NO_UI
@@ -3074,6 +3116,11 @@ static bool ident_is_string_var(App *app, const char *name_upper) {
 /* deleted unused static function: ident_is_int_var */
 
 static bool name_is_string(const char *name_upper);
+
+static Var *vars_lookup(App *app, const char *name_upper) {
+    return (Var*)g_hash_table_lookup(app->vars, name_upper);
+}
+
 static Var *vars_get_or_create(App *app, const char *name_upper) {
     Var *v = (Var*)g_hash_table_lookup(app->vars, name_upper);
     if (v) return v;
@@ -3155,6 +3202,9 @@ static void vars_reset(App *app) {
 typedef struct { const char *s; } Parser;
 
 static void skip_ws(Parser *p) { while (isspace((unsigned char)*p->s)) p->s++; }
+
+/* Peek next non-whitespace character without consuming. */
+static char peek(Parser *p) { skip_ws(p); return *p->s; }
 
 static bool consume(Parser *p, char c) {
     skip_ws(p);
@@ -3246,6 +3296,17 @@ static void var_free_array_storage(Var *v) {
         free(v->sarr);
         v->sarr = NULL;
     }
+}
+
+static void var_erase_array(Var *v) {
+    if (!v) return;
+    var_free_array_storage(v);
+    v->is_array = false;
+    v->arr_dims = 0;
+    v->arr_total = 0;
+    memset(v->arr_dim_lo, 0, sizeof(v->arr_dim_lo));
+    memset(v->arr_dim_max, 0, sizeof(v->arr_dim_max));
+    memset(v->arr_stride, 0, sizeof(v->arr_stride));
 }
 
 static bool var_define_num_array(Var *v, int ndims, int base, const int dim_max[5]) {
@@ -3507,32 +3568,13 @@ static inline void err_set(App *app, const char *msg);
 
 static bool parse_string_value(App *app, Parser *p, char **out);
 
-static bool parse_factor(App *app, Parser *p, double *out) {
+static bool parse_primary(App *app, Parser *p, double *out) {
     skip_ws(p);
-
-    // unary NOT (bitwise)
-    if (consume_word_ci(p, "NOT")) {
-        double v = 0.0;
-        if (!parse_factor(app, p, &v)) return false;
-        long long iv = (long long)llround(v);
-        *out = (double)(~iv);
-        return true;
-    }
 
 
     if (consume(p, '(')) {
         if (!parse_expr(app, p, out)) return false;
         if (!consume(p, ')')) return false;
-        return true;
-    }
-
-    // unary +/-
-    skip_ws(p);
-    if (*p->s == '+' || *p->s == '-') {
-        char op = *p->s++;
-        double v = 0.0;
-        if (!parse_factor(app, p, &v)) return false;
-        *out = (op == '-') ? -v : v;
         return true;
     }
 
@@ -3657,6 +3699,12 @@ static bool parse_factor(App *app, Parser *p, double *out) {
                 free(name);
                 return false;
             }
+
+            /* GW-BASIC: FNxxx is reserved for user-defined functions.
+               If the function is not defined, raise "Undefined user function". */
+            err_set(app, "Undefined user function");
+            free(name);
+            return false;
         }
 
         // GW-BASIC allows some 0-arg functions/constants without parentheses (notably TIMER, PI, and RND).
@@ -4061,6 +4109,32 @@ if (!v->is_array) {
     return false;
 }
 
+/* Power operator: right-associative '^' (GW-BASIC exponentiation). */
+static bool parse_power(App *app, Parser *p, double *out) {
+    if (!parse_primary(app, p, out)) return false;
+    skip_ws(p);
+    if (consume(p, '^')) {
+        double rhs = 0.0;
+        if (!parse_power(app, p, &rhs)) return false; // right-associative
+        *out = pow(*out, rhs);
+    }
+    return true;
+}
+
+static bool parse_factor(App *app, Parser *p, double *out) {
+    skip_ws(p);
+    // unary +/-
+    if (*p->s == '+' || *p->s == '-') {
+        char op = *p->s++;
+        double v = 0.0;
+        if (!parse_factor(app, p, &v)) return false;
+        *out = (op == '-') ? -v : v;
+        return true;
+    }
+
+    return parse_power(app, p, out);
+}
+
 static bool parse_term(App *app, Parser *p, double *out) {
     if (!parse_factor(app, p, out)) return false;
     for (;;) {
@@ -4079,14 +4153,23 @@ static bool parse_term(App *app, Parser *p, double *out) {
         }
 
         char op = *p->s;
-        if (op != '*' && op != '/') break;
+        // GW-BASIC: integer division operator "\\" has the same precedence as * and /.
+        // It operates on integer-truncated operands (toward zero).
+        if (op != '*' && op != '/' && op != '\\') break;
         p->s++;
         double rhs = 0.0;
         if (!parse_factor(app, p, &rhs)) return false;
-        if (op == '*') *out = (*out) * rhs;
-        else {
+        if (op == '*') {
+            *out = (*out) * rhs;
+        } else if (op == '/') {
             if (rhs == 0.0) { err_set(app, "Division by zero"); return false; }
             *out = (*out) / rhs;
+        } else {
+            // Integer division (\): truncate operands toward zero before dividing, and truncate result toward zero.
+            long long a = (long long)trunc(*out);
+            long long b = (long long)trunc(rhs);
+            if (b == 0) { err_set(app, "Division by zero"); return false; }
+            *out = (double)(a / b);
         }
     }
     return true;
@@ -4111,9 +4194,62 @@ static bool parse_add(App *app, Parser *p, double *out) {
 static bool wbasic_parse_expr(Parser *p, char opbuf[3]);
 static double basic_truth(bool b);
 
+/* Error state helpers are defined later; forward declare for expression parsing. */
+static inline void err_clear(App *app);
+static inline void err_set(App *app, const char *msg);
+
 
 static bool parse_rel(App *app, Parser *p, double *out) {
-    // Allow relational operators in numeric expressions (GW-BASIC semantics: TRUE=-1, FALSE=0)
+    /*
+     * Relational operators inside numeric expressions (GW-BASIC semantics: TRUE=-1, FALSE=0).
+     *
+     * GW-BASIC also allows string comparisons to yield numeric truth, e.g.:
+     *   X = ("A"="A")
+     *   IF ("A"<"B") THEN ...
+     *
+     * To match that, we first try parsing a string relational expression:
+     *   <string-expr> <relop> <string-expr>
+     * If that doesn't match, we fall back to the numeric path.
+     */
+    const char *save0 = p->s;
+
+    /* --- Try string relational: <string> <relop> <string> --- */
+    err_clear(app);
+    char *sa = NULL;
+    if (parse_string_value(app, p, &sa)) {
+        char op[3] = {0};
+        const char *save_op = p->s;
+        if (wbasic_parse_expr(p, op)) {
+            char *sb = NULL;
+            if (!parse_string_value(app, p, &sb)) { free(sa); return false; }
+
+            int cmp = strcmp(sa ? sa : "", sb ? sb : "");
+            free(sa);
+            free(sb);
+
+            if (strcmp(op, "=") == 0) *out = basic_truth(cmp == 0);
+            else if (strcmp(op, "<>") == 0) *out = basic_truth(cmp != 0);
+            else if (strcmp(op, "<") == 0) *out = basic_truth(cmp < 0);
+            else if (strcmp(op, ">") == 0) *out = basic_truth(cmp > 0);
+            else if (strcmp(op, "<=") == 0) *out = basic_truth(cmp <= 0);
+            else if (strcmp(op, ">=") == 0) *out = basic_truth(cmp >= 0);
+            else { err_set(app, "Type mismatch"); return false; }
+
+            return true;
+        }
+
+        /* Parsed a string expression but not a relational op: not valid in numeric context. */
+        p->s = save_op;
+        free(sa);
+        err_set(app, "Type mismatch");
+        return false;
+    }
+
+    /* Not a string-relational; restore and fall back to numeric parsing. */
+    p->s = save0;
+    err_clear(app);
+
+    // Numeric relational: <add> [<relop> <add>]
     double a = 0.0;
     if (!parse_add(app, p, &a)) return false;
 
@@ -4139,8 +4275,22 @@ static bool parse_rel(App *app, Parser *p, double *out) {
     return true;
 }
 
+
+static bool parse_not(App *app, Parser *p, double *out) {
+    // GW-BASIC precedence: arithmetic/relational happen before NOT.
+    // NOT is bitwise complement on the integer-rounded operand.
+    if (consume_word_ci(p, "NOT")) {
+        double v = 0.0;
+        if (!parse_not(app, p, &v)) return false; // allow NOT NOT ...
+        long long iv = (long long)llround(v);
+        *out = (double)(~iv);
+        return true;
+    }
+    return parse_rel(app, p, out);
+}
+
 static bool parse_bitand(App *app, Parser *p, double *out) {
-    if (!parse_rel(app, p, out)) return false;
+    if (!parse_not(app, p, out)) return false;
     for (;;) {
         if (!consume_word_ci(p, "AND")) break;
         double rhs = 0.0;
@@ -4165,10 +4315,23 @@ static bool parse_bitor(App *app, Parser *p, double *out) {
     return true;
 }
 
+static bool parse_xor(App *app, Parser *p, double *out) {
+    if (!parse_bitor(app, p, out)) return false;
+    for (;;) {
+        if (!consume_word_ci(p, "XOR")) break;
+        double rhs = 0.0;
+        if (!parse_bitor(app, p, &rhs)) return false;
+        long long a = (long long)llround(*out);
+        long long b = (long long)llround(rhs);
+        *out = (double)(a ^ b);
+    }
+    return true;
+}
+
 static bool parse_expr(App *app, Parser *p, double *out) {
-    // Numeric expression with GW-BASIC-style bitwise operators:
-    // NOT (in parse_factor) > * / > + - > AND > OR
-    return parse_bitor(app, p, out);
+    // Numeric expression precedence (GW-BASIC-style, subset):
+    // power(^) > unary(+/-) > */ MOD > +/- > relops -> truth(-1/0) > NOT > AND > OR > XOR
+    return parse_xor(app, p, out);
 }
 
 /* ===================== Condition parsing ===================== */
@@ -4619,7 +4782,11 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
                             argv_num[argc] = 0.0;
 
                             if (name_is_string(pn)) {
-                                if (!parse_string_value(app, p, &argv_str[argc])) goto fnstr_fail;
+                                if (!parse_string_value(app, p, &argv_str[argc])) {
+                                    /* GW-BASIC: no coercion between numeric and string args. */
+                                    err_set(app, "Type mismatch");
+                                    goto fnstr_fail;
+                                }
                             } else {
                                 if (!parse_expr(app, p, &argv_num[argc])) goto fnstr_fail;
                             }
@@ -4735,6 +4902,12 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
                 free(name);
                 return false;
             }
+
+            /* GW-BASIC: FNxxx$ is reserved for user-defined string functions.
+               If the function is not defined, raise "Undefined user function". */
+            err_set(app, "Undefined user function");
+            free(name);
+            return false;
         }
         // Built-in string functions
         if (!strcasecmp(name, "CHR$")) {
@@ -5142,6 +5315,9 @@ static int gw_error_code_from_msg(const char *msg) {
         { "WHILE without WEND", 29 },
         { "WEND without WHILE", 30 },
 
+        /* DEF FN */
+        { "Undefined user function", 35 },
+
         /* Undefined line number / missing targets */
         { "Undefined line number", 8 },
         { "target not found", 8 }, /* GOTO/GOSUB/ON/THEN/ELSE target not found */
@@ -5312,6 +5488,31 @@ static void stmtlist_free(StmtList *sl) {
     sl->count = 0;
 }
 
+// Strip inline comments from a statement chunk (outside quotes).
+// GW-BASIC allows: A=1 REM comment
+// We treat REM as a comment-start only when it appears as a standalone keyword
+// outside quotes (word boundaries) and is not the first token of the statement.
+static void strip_inline_rem_comment(char *s) {
+    if (!s) return;
+    bool inq = false;
+    for (char *p = s; *p; p++) {
+        char c = *p;
+        if (c == '"' && (p == s || p[-1] != '\\')) inq = !inq;
+        if (inq) continue;
+        if ((p[0] == 'R' || p[0] == 'r') && (p[1] == 'E' || p[1] == 'e') && (p[2] == 'M' || p[2] == 'm')) {
+            // Require word boundary after REM.
+            if (!is_word_boundary(p[3])) continue;
+            // Require boundary before REM.
+            if (p == s) continue; // leading REM is a full-line comment; keep it intact
+            char prev = p[-1];
+            if (!(prev == ' ' || prev == '\t' || is_word_boundary(prev))) continue;
+            *p = 0;
+            trim(s);
+            return;
+        }
+    }
+}
+
 static StmtList split_statements(const char *line_text) {
     // split by ':' not within double quotes
     StmtList sl = {0};
@@ -5329,6 +5530,22 @@ static StmtList split_statements(const char *line_text) {
     for (const char *s = line_text; ; s++) {
         char c = *s;
         if (c == '"' && (s == line_text || s[-1] != '\\')) inq = !inq;
+
+        /* Inline REM comment handling (GW-BASIC):
+           A=1 REM anything here is ignored, and ':' inside the comment must
+           NOT be treated as statement separators.
+           We detect REM as a standalone keyword outside quotes, and terminate
+           the rest of the line at the 'R' (like apostrophe comments). */
+        if (!inq && (c == 'R' || c == 'r') && starts_ci(s, "REM") && is_word_boundary(s[3])) {
+            bool ok_prev = (s == line_text);
+            if (!ok_prev) {
+                char prev = s[-1];
+                ok_prev = (prev == ' ' || prev == '\t' || is_word_boundary(prev));
+            }
+            if (ok_prev) {
+                c = 0; /* end-of-line at start of REM */
+            }
+        }
 
         /* Apostrophe (') starts an inline comment like REM, but not inside strings.
            It terminates the rest of the *line*, unless this statement itself is REM. */
@@ -5399,6 +5616,9 @@ if (do_split && c == ':' && !inq) {
             memcpy(chunk, start, len);
             chunk[len] = 0;
             char *t = trim(chunk);
+            // GW-BASIC permits inline REM comments after statements: A=1 REM ...
+            // Strip them here so trailing comment text doesn't cause syntax errors.
+            strip_inline_rem_comment(t);
             // keep even empty? no, drop empties
             if (*t) {
                 char *keep = xstrdup(t);
@@ -6155,9 +6375,42 @@ static double func_eof(App *app, int n) {
 static bool exec_open(App *app, Parser *p, int current_line) {
     skip_ws(p);
     char *path = NULL;
-    if (!parse_string_value(app, p, &path)) {
-        runtime_error(app, current_line, "OPEN requires filename");
-        return false;
+    /*
+     * GW-BASIC allows OPEN to take a filename expression, including a plain
+     * string variable like FN$.
+     *
+     * In normal operation we parse a full string expression. However, OPEN is
+     * common enough (and used heavily by the torture suite) that we include a
+     * conservative fallback: if the general string-expression parser fails,
+     * accept a bare string variable token and use its current value.
+     */
+    {
+        const char *save = p->s;
+        if (!parse_string_value(app, p, &path)) {
+            p->s = save;
+            char *name = NULL;
+            if (parse_identifier(p, &name) && name && name_is_string(name)) {
+                /* Only treat as a variable if this isn't immediately a call (FNx$(...)). */
+                const char *after = p->s;
+                Parser tmp = *p;
+                skip_ws(&tmp);
+                if (peek(&tmp) != '(') {
+                    Var *v = vars_get_or_create(app, name);
+                    path = xstrdup((v && v->kind == V_STR && v->str) ? v->str : "");
+                    free(name);
+                } else {
+                    p->s = after;
+                    free(name);
+                }
+            } else {
+                if (name) free(name);
+            }
+
+            if (!path) {
+                runtime_error(app, current_line, "OPEN requires filename");
+                return false;
+            }
+        }
     }
 
     if (!consume_word_ci(p, "FOR")) {
@@ -8059,10 +8312,182 @@ static bool exec_return(App *app, int current_line, int *line_idx, int *stmt_idx
     if (fr.kind == GOSUB_RET_KEYTRAP) {
         app->on_key_in_progress = false;
     }
+    if (fr.kind == GOSUB_RET_TIMERTRAP) {
+        app->timer_in_progress = false;
+        /* GW-BASIC: if the handler took longer than the interval, missed ticks do not queue;
+           schedule the next fire from *now* on RETURN. If the handler disabled the trap
+           via TIMER OFF or changed interval/target, respect that. */
+        if (app->timer_enabled && !app->timer_stopped && app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0) {
+            double now = timer_now_sec();
+            timer_schedule_next(app, now);
+        }
+    }
     *line_idx = fr.ret_line_idx;
     *stmt_idx = fr.ret_stmt_idx;
 
     if (fr.ret_chain_text) free(fr.ret_chain_text);
+    return true;
+}
+
+/* ---- ERASE (arrays) ---- */
+static bool exec_erase(App *app, Parser *p, int current_line) {
+    // ERASE name[,name...]
+    // GW-BASIC: only arrays; name must not include subscripts.
+    bool any = false;
+    for (;;) {
+        char *name = NULL;
+        if (!parse_identifier(p, &name)) {
+            if (!any) runtime_error(app, current_line, "Bad ERASE");
+            return false;
+        }
+        any = true;
+
+        skip_ws(p);
+        if (*p->s == '(') {
+            free(name);
+            runtime_error(app, current_line, "Bad ERASE");
+            return false;
+        }
+
+        Var *v = vars_lookup(app, name);
+        if (!v || !v->is_array) {
+            free(name);
+            runtime_error(app, current_line, "Illegal function call");
+            return false;
+        }
+
+        var_erase_array(v);
+        free(name);
+
+        skip_ws(p);
+        if (consume(p, ',')) continue;
+        break;
+    }
+    return true;
+}
+
+/* ---- SWAP (scalars or array elements) ---- */
+typedef struct {
+    Var *v;
+    bool is_str;
+    bool is_arr_elem;
+    int nd;
+    int idx[5];
+    char *name;
+} SwapRef;
+
+static bool parse_swap_ref(App *app, Parser *p, int current_line, SwapRef *out) {
+    memset(out, 0, sizeof(*out));
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) return false;
+    bool is_str = ident_is_string_var(app, name);
+
+    bool is_arr_elem = false;
+    int nd = 0;
+    int idx[5] = {0,0,0,0,0};
+    skip_ws(p);
+    if (consume(p, '(')) {
+        is_arr_elem = true;
+        if (!parse_array_indices(app, p, &nd, idx)) { free(name); runtime_error(app, current_line, "Bad array index"); return false; }
+    }
+
+    Var *v = vars_get_or_create(app, name);
+
+    // GW-BASIC semantics: a bare name (no parentheses) refers to the scalar
+    // variable, even if an array of the same base name exists.
+    // Therefore, do NOT reject SWAP Q,Q when Q() is DIMed; it's a valid scalar SWAP.
+
+    // Auto-dimension undefined arrays like GW-BASIC when an element is referenced.
+    if (is_arr_elem && !v->is_array) {
+        app->option_base_locked = true;
+        int dim_max[5] = {10,10,10,10,10};
+        bool okdim = is_str ? var_define_str_array(v, nd, app->option_base, dim_max)
+                            : var_define_num_array(v, nd, app->option_base, dim_max);
+        if (!okdim) { free(name); runtime_error(app, current_line, "Out of memory"); return false; }
+    }
+
+    out->v = v;
+    out->is_str = is_str;
+    out->is_arr_elem = is_arr_elem;
+    out->nd = nd;
+    memcpy(out->idx, idx, sizeof(idx));
+    out->name = name; // ownership
+    return true;
+}
+
+static void free_swap_ref(SwapRef *r) {
+    if (r && r->name) free(r->name);
+    if (r) r->name = NULL;
+}
+
+static bool exec_swap(App *app, Parser *p, int current_line) {
+    // SWAP a,b
+    SwapRef a = {0}, b = {0};
+    if (!parse_swap_ref(app, p, current_line, &a)) { runtime_error(app, current_line, "Bad SWAP"); return false; }
+    skip_ws(p);
+    if (!consume(p, ',')) { free_swap_ref(&a); runtime_error(app, current_line, "Bad SWAP"); return false; }
+    if (!parse_swap_ref(app, p, current_line, &b)) { free_swap_ref(&a); runtime_error(app, current_line, "Bad SWAP"); return false; }
+
+    if (a.is_str != b.is_str) {
+        free_swap_ref(&a); free_swap_ref(&b);
+        runtime_error(app, current_line, "Type mismatch");
+        return false;
+    }
+
+    if (a.is_str) {
+        char **pa = NULL;
+        char **pb = NULL;
+        if (a.is_arr_elem) {
+            if (!a.v->is_array || !a.v->sarr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offa = 0;
+            if (!array_calc_offset(a.v, a.nd, a.idx, &offa)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pa = &a.v->sarr[offa];
+            if (!*pa) *pa = xstrdup("");
+        } else {
+            pa = &a.v->str;
+            if (!*pa) *pa = xstrdup("");
+        }
+        if (b.is_arr_elem) {
+            if (!b.v->is_array || !b.v->sarr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offb = 0;
+            if (!array_calc_offset(b.v, b.nd, b.idx, &offb)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pb = &b.v->sarr[offb];
+            if (!*pb) *pb = xstrdup("");
+        } else {
+            pb = &b.v->str;
+            if (!*pb) *pb = xstrdup("");
+        }
+
+        char *tmp = *pa;
+        *pa = *pb;
+        *pb = tmp;
+    } else {
+        double *pa = NULL;
+        double *pb = NULL;
+        if (a.is_arr_elem) {
+            if (!a.v->is_array || !a.v->arr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offa = 0;
+            if (!array_calc_offset(a.v, a.nd, a.idx, &offa)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pa = &a.v->arr[offa];
+        } else {
+            pa = &a.v->num;
+        }
+        if (b.is_arr_elem) {
+            if (!b.v->is_array || !b.v->arr) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            size_t offb = 0;
+            if (!array_calc_offset(b.v, b.nd, b.idx, &offb)) { free_swap_ref(&a); free_swap_ref(&b); runtime_error(app, current_line, "Subscript out of range"); return false; }
+            pb = &b.v->arr[offb];
+        } else {
+            pb = &b.v->num;
+        }
+
+        double tmp = *pa;
+        *pa = *pb;
+        *pb = tmp;
+    }
+
+    free_swap_ref(&a);
+    free_swap_ref(&b);
     return true;
 }
 
@@ -8494,7 +8919,15 @@ if (starts_ci(s, "READ") && is_word_boundary(s[4])) {
             }
         } else {
             // numeric target
-            if (di.quoted) { free(name); free(tmp); runtime_error(app, current_line, "Type mismatch"); return false; }
+            // GW-BASIC: blank numeric DATA items (including trailing comma) read as 0.
+            // If our DATA parser marked an empty item as quoted (e.g., ""), be permissive and treat "" as 0 too.
+            if (di.quoted) {
+                const char *qt = di.text ? di.text : "";
+                Parser qp = { qt };
+                skip_ws(&qp);
+                if (*qp.s != 0) { free(name); free(tmp); runtime_error(app, current_line, "Type mismatch"); return false; }
+                // quoted-but-empty -> 0
+            }
 
             double nv = 0.0;
             // empty numeric DATA item -> 0 (GW-BASIC behavior)
@@ -8701,8 +9134,9 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
         return false; // abort execution cleanly
     }
 
-// END
+// END / SYSTEM  (GW-BASIC: SYSTEM exits to DOS; WBASIC treats SYSTEM as END for compatibility)
     if (starts_ci(s, "END") && is_word_boundary(s[3])) { free(tmp); return false; }
+    if (starts_ci(s, "SYSTEM") && is_word_boundary(s[6])) { free(tmp); return false; }
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
@@ -8995,6 +9429,56 @@ if (starts_ci(s, "WRITE") && is_word_boundary(s[5])) {
         return ok;
     }
 
+    // ERASE
+    if (starts_ci(s, "ERASE") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_erase(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+
+    // SWAP
+    if (starts_ci(s, "SWAP") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_swap(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+
+    // TIMER ON | TIMER OFF | TIMER STOP  (GW-BASIC event control for ON TIMER)
+    if (starts_ci(s, "TIMER") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        skip_ws(&p);
+        if (starts_ci(p.s, "ON") && is_word_boundary(p.s[2])) {
+            p.s += 2; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_enabled = true;
+            app->timer_stopped = false;
+            if (app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0) timer_schedule_next(app, timer_now_sec());
+            free(tmp);
+            return true;
+        }
+        if (starts_ci(p.s, "OFF") && is_word_boundary(p.s[3])) {
+            p.s += 3; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_enabled = false;
+            app->timer_stopped = false;
+            free(tmp);
+            return true;
+        }
+        if (starts_ci(p.s, "STOP") && is_word_boundary(p.s[4])) {
+            p.s += 4; skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            app->timer_stopped = true;
+            free(tmp);
+            return true;
+        }
+        runtime_error(app, current_line, "Syntax error");
+        free(tmp);
+        return false;
+    }
+
+
 
     
     // ON ERROR GOTO <line>  (GW-BASIC)
@@ -9053,9 +9537,50 @@ if (starts_ci(s, "WRITE") && is_word_boundary(s[5])) {
             free(tmp);
             return true;
         }
+
+
+        // ON TIMER(interval) GOSUB <line>
+        if (starts_ci(p.s, "TIMER") && is_word_boundary(p.s[5])) {
+            p.s += 5;
+            skip_ws(&p);
+            if (!consume(&p, '(')) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            double interval = 0.0;
+            if (!parse_expr(app, &p, &interval)) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            skip_ws(&p);
+            if (!consume(&p, ')')) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+            skip_ws(&p);
+            if (!starts_ci(p.s, "GOSUB") || !is_word_boundary(p.s[5])) { runtime_error(app, current_line, "ON TIMER expects GOSUB"); free(tmp); return false; }
+            p.s += 5;
+            skip_ws(&p);
+            double ln = 0.0;
+            if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "ON TIMER expects line number"); free(tmp); return false; }
+            int target_line = (int)llround(ln);
+            skip_ws(&p);
+            if (*p.s != 0) { runtime_error(app, current_line, "Syntax error"); free(tmp); return false; }
+
+            if (target_line <= 0) {
+                // Disable
+                app->on_timer_gosub_line = 0;
+                app->on_timer_interval = 0.0;
+                app->timer_enabled = false;
+                app->timer_stopped = false;
+                app->timer_in_progress = false;
+                app->timer_next_fire = 0.0;
+                free(tmp);
+                return true;
+            }
+
+            // Arm (but do not implicitly enable; requires TIMER ON like GW-BASIC)
+            int idx = program_find_index(&app->prog, target_line);
+            if (idx < 0) { runtime_error(app, current_line, "ON TIMER target not found"); free(tmp); return false; }
+            app->on_timer_gosub_line = target_line;
+            app->on_timer_interval = interval;
+            /* next fire scheduled on RETURN from handler (no queued ticks) */
+            free(tmp);
+            return true;
+        }
     }
 
-    
 // RESUME [<line>] | RESUME NEXT  (Phase 3: implement RESUME NEXT in addition to plain RESUME and RESUME <line>)
 if (starts_ci(s, "RESUME") && is_word_boundary(s[6])) {
     Parser p = { s + 6 };
@@ -9995,6 +10520,35 @@ if (app->key_trap_enabled && app->runtime_key_macro && app->runtime_key_macro[0]
     g_free(app->runtime_key_macro);
     app->runtime_key_macro = NULL;
 }
+
+        /* If an ON TIMER(interval) GOSUB trap is armed, dispatch it at this safe point.
+           GW-BASIC semantics: no re-entrancy; firing is best-effort at statement boundaries. */
+        if (app->timer_enabled && !app->timer_stopped && app->on_timer_gosub_line > 0 && app->on_timer_interval > 0.0 && !app->timer_in_progress) {
+            double now = timer_now_sec();
+            if (timer_reached(now, app->timer_next_fire)) {
+                int idx = program_find_index(&app->prog, app->on_timer_gosub_line);
+                if (idx >= 0) {
+                    if (app->gosub_sp >= 128) { runtime_error(app, current_line, "GOSUB stack overflow"); }
+                    else {
+                        app->gosub_stack[app->gosub_sp++] = (GosubFrame){
+                            .kind = GOSUB_RET_TIMERTRAP,
+                            .ret_line_idx = line_idx,
+                            .ret_stmt_idx = stmt_idx,
+                            .ret_chain_next_si = 0,
+                            .ret_chain_text = NULL,
+                        };
+                        app->timer_in_progress = true;
+                        /* next fire scheduled on RETURN from handler (no queued ticks) */
+                        line_idx = idx;
+                        stmt_idx = 0;
+                        continue;
+                    }
+                } else {
+                    // If the handler line doesn't exist, disable the trap to avoid looping.
+                    app->on_timer_gosub_line = 0;
+                }
+            }
+        }
 
         StmtList sl = split_statements(app->prog.lines[line_idx].text);
 
