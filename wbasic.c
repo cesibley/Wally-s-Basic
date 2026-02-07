@@ -248,13 +248,26 @@ static void apply_windows_dark_titlebar(GtkWidget *widget) {
     HMODULE dwm = LoadLibraryA("dwmapi.dll");
     if (!dwm) return;
 
-    typedef HRESULT (WINAPI *DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
-    DwmSetWindowAttributeFn set_attr =
-        (DwmSetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
-    if (!set_attr) {
-        FreeLibrary(dwm);
-        return;
-    }
+	    typedef HRESULT (WINAPI *DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
+	    FARPROC p = GetProcAddress(dwm, "DwmSetWindowAttribute");
+	    if (!p) {
+	        FreeLibrary(dwm);
+	        return;
+	    }
+	    /*
+	     * Avoid -Wcast-function-type on MinGW/GCC: FARPROC is an untyped function
+	     * pointer, so casting directly to a specific signature triggers warnings.
+	     */
+	    union {
+	        FARPROC p;
+	        DwmSetWindowAttributeFn f;
+	    } u;
+	    u.p = p;
+	    DwmSetWindowAttributeFn set_attr = u.f;
+	    if (!set_attr) {
+	        FreeLibrary(dwm);
+	        return;
+	    }
 
     BOOL enabled = TRUE;
     const DWORD dwmwa_use_immersive_dark_mode = 20;
