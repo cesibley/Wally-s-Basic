@@ -145,6 +145,7 @@
 - Added demo coverage for WRITE/INPUT edge cases: empty string, embedded commas in strings, leading/trailing spaces, 
   and exponent/scientific numeric formats.
 
+## [V1.08-V1.09] - Skipped
 
 ## [V1.07]
 - Changes to eliminate warning during compile. GTK and CLI now compile cleanly.
