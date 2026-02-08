@@ -10,7 +10,6 @@
 
 100 DEFINT A-Z
 110 PASS=0: FAIL=0
-
 120 PRINT "Running IF torture test..."
 130 PRINT
 
