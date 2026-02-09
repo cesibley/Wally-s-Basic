@@ -6293,24 +6293,26 @@ static bool exec_locate(App *app, Parser *p, int current_line) {
     app->out_row = row;
     app->out_col = col;
 
-#ifdef WBASIC_NO_UI
-    /* Cursor positioning is meaningful only for a real terminal. */
-    app->headless_cursor_dirty = true;
+#ifndef _WIN32
+    if (!wbasic_ui_active(app)) {
+        /* Cursor positioning is meaningful only for a real terminal. */
+        app->headless_cursor_dirty = true;
 
-    if (headless_stdout_is_tty()) {
-        /* Apply cursor visibility if requested. */
-        if (have_cursor) {
-            if (cursor_vis) fputs("\x1b[?25h", stdout);
-            else            fputs("\x1b[?25l", stdout);
+        if (headless_stdout_is_tty()) {
+            /* Apply cursor visibility if requested. */
+            if (have_cursor) {
+                if (cursor_vis) fputs("\x1b[?25h", stdout);
+                else            fputs("\x1b[?25l", stdout);
+            }
+
+            /* Move cursor immediately. */
+            headless_ansi_move(app->out_row, app->out_col);
+            app->headless_cursor_dirty = false;
+
+            /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
+            /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
+            fflush(stdout);
         }
-
-        /* Move cursor immediately. */
-        headless_ansi_move(app->out_row, app->out_col);
-        app->headless_cursor_dirty = false;
-
-        /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
-        /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
-        fflush(stdout);
     }
 #else
     (void)have_cursor;
@@ -13529,4 +13531,3 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
-
