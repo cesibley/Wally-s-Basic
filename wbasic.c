@@ -102,6 +102,7 @@
 #include <time.h>
 #include <errno.h>
 #ifdef _WIN32
+#include <conio.h>
 #include <windows.h>
 #endif
 
@@ -358,6 +359,12 @@ typedef struct _GtkStyleContext GtkStyleContext;
 #define FALSE 0
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define WBASIC_UNUSED __attribute__((unused))
+#else
+#define WBASIC_UNUSED
+#endif
+
 /* Common GTK/GDK cast-style macros used throughout the UI layer */
 #ifndef GTK_WINDOW
 #define GTK_WINDOW(x) ((GtkWindow*)(x))
@@ -432,54 +439,54 @@ typedef struct _GdkEvent   GdkEvent;
 typedef struct _GdkEventKey GdkEventKey;
 
 /* No-op stubs for GTK entry points and helpers */
-static inline void gtk_init(int *argc, char ***argv) { (void)argc; (void)argv; }
-static inline void gtk_main(void) {}
-static inline void gtk_main_quit(void) {}
-static inline int  gtk_init_check(int *argc, char ***argv) { (void)argc; (void)argv; return TRUE; }
-static inline void gtk_widget_show_all(GtkWidget *w) { (void)w; }
-static inline void gtk_widget_destroy(GtkWidget *w) { (void)w; }
-static inline void gtk_widget_set_sensitive(GtkWidget *w, int sensitive) { (void)w; (void)sensitive; }
+static inline WBASIC_UNUSED void gtk_init(int *argc, char ***argv) { (void)argc; (void)argv; }
+static inline WBASIC_UNUSED void gtk_main(void) {}
+static inline WBASIC_UNUSED void gtk_main_quit(void) {}
+static inline WBASIC_UNUSED int  gtk_init_check(int *argc, char ***argv) { (void)argc; (void)argv; return TRUE; }
+static inline WBASIC_UNUSED void gtk_widget_show_all(GtkWidget *w) { (void)w; }
+static inline WBASIC_UNUSED void gtk_widget_destroy(GtkWidget *w) { (void)w; }
+static inline WBASIC_UNUSED void gtk_widget_set_sensitive(GtkWidget *w, int sensitive) { (void)w; (void)sensitive; }
 
-static inline void gtk_entry_set_text(GtkEntry *e, const char *s) { (void)e; (void)s; }
-static inline void gtk_editable_set_position(GtkEditable *e, int pos) { (void)e; (void)pos; }
-static inline void gtk_editable_select_region(GtkEditable *e, int start, int end) { (void)e; (void)start; (void)end; }
-static inline void gtk_editable_cut_clipboard(GtkEditable *e) { (void)e; }
-static inline void gtk_editable_copy_clipboard(GtkEditable *e) { (void)e; }
-static inline void gtk_editable_paste_clipboard(GtkEditable *e) { (void)e; }
+static inline WBASIC_UNUSED void gtk_entry_set_text(GtkEntry *e, const char *s) { (void)e; (void)s; }
+static inline WBASIC_UNUSED void gtk_editable_set_position(GtkEditable *e, int pos) { (void)e; (void)pos; }
+static inline WBASIC_UNUSED void gtk_editable_select_region(GtkEditable *e, int start, int end) { (void)e; (void)start; (void)end; }
+static inline WBASIC_UNUSED void gtk_editable_cut_clipboard(GtkEditable *e) { (void)e; }
+static inline WBASIC_UNUSED void gtk_editable_copy_clipboard(GtkEditable *e) { (void)e; }
+static inline WBASIC_UNUSED void gtk_editable_paste_clipboard(GtkEditable *e) { (void)e; }
 
-static inline GtkWidget *gtk_window_get_focus(GtkWindow *w) { (void)w; return NULL; }
+static inline WBASIC_UNUSED GtkWidget *gtk_window_get_focus(GtkWindow *w) { (void)w; return NULL; }
 
-static inline GtkWidget *gtk_file_chooser_dialog_new(const char *title, GtkWindow *parent, int action, ...) {
+static inline WBASIC_UNUSED GtkWidget *gtk_file_chooser_dialog_new(const char *title, GtkWindow *parent, int action, ...) {
     (void)title; (void)parent; (void)action; return NULL;
 }
-static inline int gtk_dialog_run(void *dlg) { (void)dlg; return GTK_RESPONSE_CANCEL; }
-static inline char *gtk_file_chooser_get_filename(GtkFileChooser *c) { (void)c; return NULL; }
-static inline void gtk_file_chooser_set_filename(GtkFileChooser *c, const char *f) { (void)c; (void)f; }
-static inline void gtk_file_chooser_set_current_name(GtkFileChooser *c, const char *n) { (void)c; (void)n; }
-static inline void gtk_file_chooser_set_do_overwrite_confirmation(GtkFileChooser *c, int b) { (void)c; (void)b; }
+static inline WBASIC_UNUSED int gtk_dialog_run(void *dlg) { (void)dlg; return GTK_RESPONSE_CANCEL; }
+static inline WBASIC_UNUSED char *gtk_file_chooser_get_filename(GtkFileChooser *c) { (void)c; return NULL; }
+static inline WBASIC_UNUSED void gtk_file_chooser_set_filename(GtkFileChooser *c, const char *f) { (void)c; (void)f; }
+static inline WBASIC_UNUSED void gtk_file_chooser_set_current_name(GtkFileChooser *c, const char *n) { (void)c; (void)n; }
+static inline WBASIC_UNUSED void gtk_file_chooser_set_do_overwrite_confirmation(GtkFileChooser *c, int b) { (void)c; (void)b; }
 
-static inline GtkWidget *gtk_message_dialog_new(GtkWindow *parent, int flags, int type, int buttons, const char *msg, ...) {
+static inline WBASIC_UNUSED GtkWidget *gtk_message_dialog_new(GtkWindow *parent, int flags, int type, int buttons, const char *msg, ...) {
     (void)parent; (void)flags; (void)type; (void)buttons; (void)msg; return NULL;
 }
-static inline void gtk_message_dialog_format_secondary_text(GtkWidget *dlg, const char *msg, ...) { (void)dlg; (void)msg; }
-static inline void gtk_dialog_add_button(void *dlg, const char *label, int response) { (void)dlg; (void)label; (void)response; }
+static inline WBASIC_UNUSED void gtk_message_dialog_format_secondary_text(GtkWidget *dlg, const char *msg, ...) { (void)dlg; (void)msg; }
+static inline WBASIC_UNUSED void gtk_dialog_add_button(void *dlg, const char *label, int response) { (void)dlg; (void)label; (void)response; }
 
-static inline GtkTextBuffer *gtk_text_view_get_buffer(GtkTextView *tv) { (void)tv; return NULL; }
-static inline int gtk_text_view_get_editable(GtkTextView *tv) { (void)tv; return FALSE; }
-static inline GtkClipboard *gtk_clipboard_get(int sel) { (void)sel; return NULL; }
+static inline WBASIC_UNUSED GtkTextBuffer *gtk_text_view_get_buffer(GtkTextView *tv) { (void)tv; return NULL; }
+static inline WBASIC_UNUSED int gtk_text_view_get_editable(GtkTextView *tv) { (void)tv; return FALSE; }
+static inline WBASIC_UNUSED GtkClipboard *gtk_clipboard_get(int sel) { (void)sel; return NULL; }
 
-static inline void gtk_text_buffer_get_start_iter(GtkTextBuffer *b, GtkTextIter *i) { (void)b; if(i) i->_dummy=0; }
-static inline void gtk_text_buffer_get_end_iter(GtkTextBuffer *b, GtkTextIter *i) { (void)b; if(i) i->_dummy=0; }
-static inline void gtk_text_buffer_select_range(GtkTextBuffer *b, GtkTextIter *a, GtkTextIter *c) { (void)b; (void)a; (void)c; }
-static inline void gtk_text_buffer_copy_clipboard(GtkTextBuffer *b, GtkClipboard *cb) { (void)b; (void)cb; }
-static inline void gtk_text_buffer_cut_clipboard(GtkTextBuffer *b, GtkClipboard *cb, int del) { (void)b; (void)cb; (void)del; }
-static inline void gtk_text_buffer_paste_clipboard(GtkTextBuffer *b, GtkClipboard *cb, void *iter, int def) { (void)b; (void)cb; (void)iter; (void)def; }
-static inline char *gtk_text_buffer_get_text(GtkTextBuffer *b, GtkTextIter *a, GtkTextIter *c, int inc) {
+static inline WBASIC_UNUSED void gtk_text_buffer_get_start_iter(GtkTextBuffer *b, GtkTextIter *i) { (void)b; if(i) i->_dummy=0; }
+static inline WBASIC_UNUSED void gtk_text_buffer_get_end_iter(GtkTextBuffer *b, GtkTextIter *i) { (void)b; if(i) i->_dummy=0; }
+static inline WBASIC_UNUSED void gtk_text_buffer_select_range(GtkTextBuffer *b, GtkTextIter *a, GtkTextIter *c) { (void)b; (void)a; (void)c; }
+static inline WBASIC_UNUSED void gtk_text_buffer_copy_clipboard(GtkTextBuffer *b, GtkClipboard *cb) { (void)b; (void)cb; }
+static inline WBASIC_UNUSED void gtk_text_buffer_cut_clipboard(GtkTextBuffer *b, GtkClipboard *cb, int del) { (void)b; (void)cb; (void)del; }
+static inline WBASIC_UNUSED void gtk_text_buffer_paste_clipboard(GtkTextBuffer *b, GtkClipboard *cb, void *iter, int def) { (void)b; (void)cb; (void)iter; (void)def; }
+static inline WBASIC_UNUSED char *gtk_text_buffer_get_text(GtkTextBuffer *b, GtkTextIter *a, GtkTextIter *c, int inc) {
     (void)b; (void)a; (void)c; (void)inc; return NULL;
 }
 
-static inline GdkDisplay *gdk_display_get_default(void) { return NULL; }
-static inline void gdk_display_beep(GdkDisplay *d) { (void)d; }
+static inline WBASIC_UNUSED GdkDisplay *gdk_display_get_default(void) { return NULL; }
+static inline WBASIC_UNUSED void gdk_display_beep(GdkDisplay *d) { (void)d; }
 
 /* Headless stubs for a few UI helpers that are referenced by parser/editor code paths */
 /*
@@ -1599,14 +1606,14 @@ static void cmd_entry_set_stealth(App *app, bool on) {
 }
 
 #else
-static inline void cmd_entry_install_stealth_css(App *app) { (void)app; }
-static inline void cmd_entry_set_stealth(App *app, bool on) { (void)app; (void)on; }
+static inline WBASIC_UNUSED void cmd_entry_install_stealth_css(App *app) { (void)app; }
+static inline WBASIC_UNUSED void cmd_entry_set_stealth(App *app, bool on) { (void)app; (void)on; }
 #endif /* !WBASIC_NO_UI */
 
 #ifdef WBASIC_NO_UI
-static inline void ui_pump_raw(App *app) { (void)app; }
-static inline void ui_pump(App *app) { (void)app; }
-static void ui_delay_ms(App *app, int ms) { (void)app; if (ms>0) g_usleep((gulong)ms * 1000UL); }
+static inline WBASIC_UNUSED void ui_pump_raw(App *app) { (void)app; }
+static inline WBASIC_UNUSED void ui_pump(App *app) { (void)app; }
+static WBASIC_UNUSED void ui_delay_ms(App *app, int ms) { (void)app; if (ms>0) g_usleep((gulong)ms * 1000UL); }
 #else
 static inline void ui_pump_raw(App *app) {
     while (gtk_events_pending()) gtk_main_iteration_do(FALSE);
@@ -4538,6 +4545,24 @@ static void headless_tty_shutdown(App *app) {
 
 static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
+    if (!_kbhit()) return;
+
+    int c = _getch();
+    if (c == 0 || c == 224) {
+        (void)_getch();
+        return;
+    }
+
+    unsigned char uc = (unsigned char)c;
+    if (uc == 27) {
+        app->inkey_char = (char)uc;
+        app->inkey_ready = true;
+        return;
+    }
+    if (uc >= 0x20 && uc <= 0x7E) {
+        app->inkey_char = (char)uc;
+        app->inkey_ready = true;
+    }
 }
 #elif defined(WBASIC_NO_UI) && !defined(_WIN32)
 static void do_stop(App *app);
@@ -6107,7 +6132,8 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
             int col = (int)llround(v);
-            if (col < 1) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            if (col < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            if (col == 0) col = 1;// GW-BASIC tolerates TAB(0) and treats it as column 1
             print_tab_to(app, col);
             last_sep = 0;
         } else if (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])) {
@@ -13415,4 +13441,3 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
-
