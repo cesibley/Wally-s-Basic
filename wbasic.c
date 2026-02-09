@@ -461,6 +461,9 @@ static inline void gtk_widget_destroy(GtkWidget *w) { (void)w; }
 static inline void gtk_widget_set_sensitive(GtkWidget *w, int sensitive) { (void)w; (void)sensitive; }
 
 static inline void gtk_entry_set_text(GtkEntry *e, const char *s) { (void)e; (void)s; }
+static inline const char *gtk_entry_get_text(GtkEntry *e) { (void)e; return ""; }
+static inline void gtk_entry_set_visibility(GtkEntry *e, int visible) { (void)e; (void)visible; }
+static inline void gtk_entry_set_invisible_char(GtkEntry *e, unsigned int ch) { (void)e; (void)ch; }
 static inline void gtk_editable_set_position(GtkEditable *e, int pos) { (void)e; (void)pos; }
 static inline void gtk_editable_select_region(GtkEditable *e, int start, int end) { (void)e; (void)start; (void)end; }
 static inline void gtk_editable_cut_clipboard(GtkEditable *e) { (void)e; }
@@ -3044,6 +3047,11 @@ static char *editor_get_text(GtkTextBuffer *buf) {
 static void editor_set_text(GtkTextBuffer *buf, const char *text) {
     if (!buf) return;
     gtk_text_buffer_set_text(buf, text ? text : "", -1);
+}
+#else
+static inline void editor_set_text(GtkTextBuffer *buf, const char *text) {
+    (void)buf;
+    (void)text;
 }
 #endif /* !WBASIC_NO_UI */
 
