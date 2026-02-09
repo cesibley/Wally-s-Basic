@@ -1,7 +1,0 @@
-10 OPEN "test.txt" FOR OUTPUT AS #1
-20 PRINT #1, "HELLO"
-30 CLOSE #1
-40 OPEN "test.txt" FOR INPUT AS #1
-50 LINE INPUT #1, A$
-60 PRINT "[";A$;"]"
-70 CLOSE #1
