@@ -32,6 +32,9 @@
   - Added log-check helper script to detect non-zero FAIL= results.
   - Simplified automated validation of torture-test output.
 
+- Fixed issue with TAB(0) reporting error.
+
+
 ## [V1.11] – Extensive Testing, Compatibility GAP and Bug Squish
 
 - Testing and Verification Added
