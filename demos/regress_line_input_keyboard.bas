@@ -1,2 +1,0 @@
-10 LINE INPUT A$
-20 PRINT "[";A$;"]"
