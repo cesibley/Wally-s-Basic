@@ -102,6 +102,7 @@
 #include <time.h>
 #include <errno.h>
 #ifdef _WIN32
+#include <conio.h>
 #include <windows.h>
 #endif
 
@@ -4544,6 +4545,24 @@ static void headless_tty_shutdown(App *app) {
 
 static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
+    if (!_kbhit()) return;
+
+    int c = _getch();
+    if (c == 0 || c == 224) {
+        (void)_getch();
+        return;
+    }
+
+    unsigned char uc = (unsigned char)c;
+    if (uc == 27) {
+        app->inkey_char = (char)uc;
+        app->inkey_ready = true;
+        return;
+    }
+    if (uc >= 0x20 && uc <= 0x7E) {
+        app->inkey_char = (char)uc;
+        app->inkey_ready = true;
+    }
 }
 #elif defined(WBASIC_NO_UI) && !defined(_WIN32)
 static void do_stop(App *app);
