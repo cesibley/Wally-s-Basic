@@ -1,19 +1,4 @@
-#include <termios.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 
-
-
-/* Optional embedded icon support.
- * If you link an object produced from `ld -r -b binary icon.png`, these symbols will exist.
- * Otherwise they will be NULL (weak) and we simply skip setting the window icon.
- */
-#if !defined(WBASIC_NO_UI)
-extern const unsigned char _binary_icon_png_start[] __attribute__((weak));
-extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
-#endif
 
 /*
  * WBASIC — GW-BASIC–style interpreter with GTK UI
@@ -320,11 +305,6 @@ extern const unsigned int  _binary_icon_png_size;
 #ifndef WBASIC_NO_UI
 /* Load embedded PNG icon into a GdkPixbuf without deprecated APIs. */
 static GdkPixbuf *ui_load_wbasic_icon_pixbuf(void) {
-    if ((const void*)_binary_icon_png_start == NULL || (const void*)_binary_icon_png_end == NULL) return NULL;
-    const unsigned char *start = _binary_icon_png_start;
-    const unsigned char *end   = _binary_icon_png_end;
-    if (!start || !end || end <= start) return NULL;
-
     GBytes *bytes = g_bytes_new_static(_binary_icon_png_start, (gsize)(_binary_icon_png_end - _binary_icon_png_start));
     GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
     GError *err = NULL;
@@ -461,9 +441,6 @@ static inline void gtk_widget_destroy(GtkWidget *w) { (void)w; }
 static inline void gtk_widget_set_sensitive(GtkWidget *w, int sensitive) { (void)w; (void)sensitive; }
 
 static inline void gtk_entry_set_text(GtkEntry *e, const char *s) { (void)e; (void)s; }
-static inline const char *gtk_entry_get_text(GtkEntry *e) { (void)e; return ""; }
-static inline void gtk_entry_set_visibility(GtkEntry *e, int visible) { (void)e; (void)visible; }
-static inline void gtk_entry_set_invisible_char(GtkEntry *e, unsigned int ch) { (void)e; (void)ch; }
 static inline void gtk_editable_set_position(GtkEditable *e, int pos) { (void)e; (void)pos; }
 static inline void gtk_editable_select_region(GtkEditable *e, int start, int end) { (void)e; (void)start; (void)end; }
 static inline void gtk_editable_cut_clipboard(GtkEditable *e) { (void)e; }
@@ -593,7 +570,7 @@ static char *xstrdup(const char *s) {
 
 #include <ctype.h>
 #include <time.h>
-#if !defined(_WIN32)
+#if defined(WBASIC_NO_UI) && !defined(_WIN32)
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -623,9 +600,6 @@ static void print_usage(const char *prog)
     fprintf(stderr, "Usage: %s [-r] [program.bas]\n", prog);
     fprintf(stderr, "If a BASIC program file is provided, WBASIC will load it on startup.\n");
     fprintf(stderr, "  -r          Load and RUN the program automatically.\n");
-    fprintf(stderr, "  -c, --cli   Run in terminal/CLI mode (no GTK UI).\n");
-    fprintf(stderr, "      --headless  Alias for --cli.\n");
-    fprintf(stderr, "      --gtk       Force GTK UI (do not auto-fallback to CLI).\n");
     fprintf(stderr, "  -h, --help  Show this help and exit.\n");
 #endif
 }
@@ -882,8 +856,7 @@ typedef struct App {
     RunState run_state;
     bool inkey_ready;
     char inkey_char;
-
-    /* Headless (CLI) terminal I/O state. Present in unified builds too. */
+#ifdef WBASIC_NO_UI
     int headless_tty_fd;
 #ifdef _WIN32
     void *headless_tty_old;
@@ -893,7 +866,7 @@ typedef struct App {
     bool headless_tty_inited;
     bool headless_tty_using_stdin;
     bool headless_cursor_dirty; /* legacy safety net: LOCATE now moves cursor immediately */
-
+#endif
 
     /* UI helper: last executing BASIC line number (used for PAUSE/STOP jump) */
     int ui_last_exec_line;
@@ -1132,20 +1105,12 @@ GosubFrame gosub_stack[128];
 
 } App;
 
-/* ---- Unified build helpers ---- */
-static inline bool wbasic_ui_active(const App *app) {
-    return app && !app->ui_destroyed && app->win && app->output_buf && app->output_view;
-}
-static inline bool wbasic_has_ui_buffers(const App *app) {
-    return app && !app->ui_destroyed && app->editor_buf && app->output_buf;
-}
 
 
 
 
 
-
-#ifndef _WIN32
+#ifdef WBASIC_NO_UI
 /* --- ANSI color + LOCATE support for exported/CLI builds ---
    Behavior:
    - Each printed line begins by applying the current BASIC COLOR (cached).
@@ -1154,16 +1119,9 @@ static inline bool wbasic_has_ui_buffers(const App *app) {
    - COLOR with no arguments emits reset (\x1b[0m) immediately and restores defaults (cur_fg/cur_bg = 16).
 */
 
-#ifndef WBASIC_HAS_HEADLESS_STDOUT_IS_TTY
-#define WBASIC_HAS_HEADLESS_STDOUT_IS_TTY 1
-static bool headless_stdout_is_tty(void) {
-    return isatty(fileno(stdout));
-}
-#endif
-
 /* Forward decls for headless ANSI helpers (defined later in this file). */
+static inline bool headless_stdout_is_tty(void);
 static inline void headless_ansi_move(int row, int col);
-static inline void headless_ansi_clear(void);
 static inline void headless_ansi_color_cache_reset(void);
 static inline void headless_ansi_apply_color(int fg, int bg);
 
@@ -1651,7 +1609,6 @@ static inline void ui_pump(App *app) { (void)app; }
 static void ui_delay_ms(App *app, int ms) { (void)app; if (ms>0) g_usleep((gulong)ms * 1000UL); }
 #else
 static inline void ui_pump_raw(App *app) {
-    if (!app || app->ui_destroyed || !app->win) return;
     while (gtk_events_pending()) gtk_main_iteration_do(FALSE);
     /* Ensure widget redraws (GtkEntry text/cursor) are flushed while we are in a busy-wait loop */
     if (app && !app->ui_destroyed && app->win && GTK_IS_WIDGET(app->win)) {
@@ -1694,7 +1651,6 @@ static inline void ui_pump(App *app) {
 // Sleep while keeping the GTK UI responsive.
 static void ui_delay_ms(App *app, int ms) {
     if (ms <= 0) return;
-    if (!app || app->ui_destroyed || !app->win) { g_usleep((gulong)ms * 1000UL); return; }
     // Sleep in small chunks so we can pump GTK events.
     int remaining = ms;
     while (remaining > 0) {
@@ -2131,9 +2087,9 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 
 static void screen_render_now(App *app) {
-    if (!wbasic_ui_active(app)) return;
+    if (!app) return;
     screen_ensure(app);
-    if (!app->screen || !app->output_buf || !app->output_view) return;
+    if (!app->screen || !app->output_buf) return;
 
     int R = app->screen_rows, C = app->screen_cols;
 
@@ -2253,8 +2209,11 @@ static void screen_render(App *app) { (void)app; }
 
 
 
-#ifndef _WIN32
+#ifdef WBASIC_NO_UI
 // Headless terminal helpers (TTY only): use ANSI escape sequences for CLS/LOCATE/COLOR fidelity.
+static inline bool headless_stdout_is_tty(void) {
+    return isatty(fileno(stdout));
+}
 static inline void headless_ansi_move(int row, int col) {
     if (row < 1) row = 1;
     if (col < 1) col = 1;
@@ -2320,54 +2279,43 @@ static inline void headless_ansi_apply_color(int fg, int bg) {
     headless_last_fg = fg;
     headless_last_bg = bg;
 }
-#endif /* !_WIN32 */
+#endif
 
 static void out_append(App *app, const char *s) {
-    if (!app || !s) return;
-
-    /* CLI mode (unified --cli/--headless): write directly to stdout using ANSI fidelity.
-       Keep the internal screen/cursor model coherent for LOCATE/COLOR behavior. */
-    if (!wbasic_ui_active(app)) {
-#ifndef _WIN32
-        screen_write(app, s);
-        wbasic_cli_write_text_ansi(app, s);
-        if (strchr(s, '\n')) fflush(stdout);
-#else
-        fputs(s, stdout);
-        fflush(stdout);
+#ifdef WBASIC_NO_UI
+    wbasic_cli_write_text_ansi(app, s);
 #endif
-        return;
-    }
-
-    // GTK mode: write into screen buffer, then render.
+    // Write into screen buffer, then render.
+    // For visual immediacy, flush immediately when the write includes a newline.
     screen_write(app, s);
     screen_render(app);
 
-    if (strchr(s, '\n')) {
+    if (app && s && strchr(s, '\n')) {
         screen_render_flush(app);
     }
 
-    const char *p = strchr(s, '\n');
-    if (p) {
-        double spd = app->output_speed;
-        if (spd < 0.0) spd = 0.0;
-        if (spd > 1.0) spd = 1.0;
-        int delay_ms = (int)lround((1.0 - spd) * 200.0);
+    if (app && s) {
+        const char *p = strchr(s, '\n');
+        if (p) {
+            double spd = app->output_speed;
+            if (spd < 0.0) spd = 0.0;
+            if (spd > 1.0) spd = 1.0;
+            int delay_ms = (int)lround((1.0 - spd) * 200.0);
 
-        int nl = 0;
-        for (const char *q = s; *q; q++) if (*q == '\n') nl++;
+            int nl = 0;
+            for (const char *q = s; *q; q++) if (*q == '\n') nl++;
 
-        ui_pump(app);
-        if (app->quitting) return;
-        if (delay_ms > 0) {
-            for (int i = 0; i < nl; i++) {
-                ui_delay_ms(app, delay_ms);
-                if (app->quitting) return;
+            ui_pump(app);
+            if (app->quitting) return;
+            if (delay_ms > 0) {
+                for (int i = 0; i < nl; i++) {
+                    ui_delay_ms(app, delay_ms);
+                    if (app->quitting) return;
+                }
             }
         }
     }
 }
-
 #ifndef WBASIC_NO_UI
 static gboolean on_cmd_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data) {
     (void)w;
@@ -2395,36 +2343,36 @@ static void out_printf(App *app, const char *fmt, ...) {
 
 
 static void out_clear(App *app, bool terminal_clear) {
+    // Clear both GTK buffer and our screen buffer.
     if (!app) return;
+    (void)terminal_clear; // silence unused in some builds
 
-    // Reset to Preferences exact colors at each CLS/OUT_CLEAR.
-    app->cur_fg = 16;
-    app->cur_bg = 16;
-
-    /* CLI mode: do not touch GTK buffers/widgets. */
-    if (!wbasic_ui_active(app)) {
-#ifndef _WIN32
-        if (headless_stdout_is_tty()) {
-            fputs("\x1b[0m", stdout);
-            if (terminal_clear) headless_ansi_clear();
-            headless_ansi_color_cache_reset();
-            app->headless_cursor_dirty = false;
-            fflush(stdout);
-        }
-#endif
-        screen_clear(app);
-        return;
+        // Reset to Preferences exact colors at each CLS/OUT_CLEAR.
+        app->cur_fg = 16;
+        app->cur_bg = 16;
+#ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
+        /* COLOR with no args => ANSI reset */
+        fputs("\x1b[0m", stdout);
     }
-
-#ifndef _WIN32
-    (void)terminal_clear;
 #endif
-
     screen_clear(app);
-
+#ifdef WBASIC_NO_UI
+    if (headless_stdout_is_tty()) {
+        if (terminal_clear) {
+            headless_ansi_clear();
+        }
+        /* Always reset color cache on logical clear so next output re-applies color if needed. */
+        headless_ansi_color_cache_reset();
+        app->headless_cursor_dirty = false;
+        fflush(stdout);
+    }
+#endif
 #ifndef WBASIC_NO_UI
     scrollback_clear(app);
-    if (app->output_buf) gtk_text_buffer_set_text(app->output_buf, "", -1);
+#endif
+#ifndef WBASIC_NO_UI
+    gtk_text_buffer_set_text(app->output_buf, "", -1);
     /* Reset optimized scrollback transcript + screen mark */
     app->out_scrollback_lines = 0;
     app->out_scrollback_max_lines = 1000;
@@ -2436,11 +2384,12 @@ static void out_clear(App *app, bool terminal_clear) {
         else gtk_text_buffer_move_mark(app->output_buf, m, &it0);
         app->out_screen_start_mark = m;
     }
+#endif
+#ifndef WBASIC_NO_UI
     // Render a blank screen so LOCATE targets start from a clean slate.
     screen_render(app);
 #endif
 }
-
 
 #ifndef WBASIC_NO_UI
 
@@ -3035,7 +2984,6 @@ static void program_set_line(Program *p, int line_no, const char *text) {
 
 #ifndef WBASIC_NO_UI
 static char *editor_get_text(GtkTextBuffer *buf) {
-    if (!buf) return g_strdup("");
     GtkTextIter a, b;
     gtk_text_buffer_get_start_iter(buf, &a);
     gtk_text_buffer_get_end_iter(buf, &b);
@@ -3045,55 +2993,32 @@ static char *editor_get_text(GtkTextBuffer *buf) {
 
 #ifndef WBASIC_NO_UI
 static void editor_set_text(GtkTextBuffer *buf, const char *text) {
-    if (!buf) return;
     gtk_text_buffer_set_text(buf, text ? text : "", -1);
-}
-#else
-static inline void editor_set_text(GtkTextBuffer *buf, const char *text) {
-    (void)buf;
-    (void)text;
 }
 #endif /* !WBASIC_NO_UI */
 
 static void program_to_editor(App *app) {
-    if (!app) return;
-    if (!wbasic_has_ui_buffers(app)) return; /* no GTK editor in CLI mode */
+#ifdef WBASIC_NO_UI
+    (void)app;
+    /* No editor in headless builds. */
+#else
     GString *gs = g_string_new(NULL);
     for (size_t i = 0; i < app->prog.count; i++) {
         g_string_append_printf(gs, "%d %s\n", app->prog.lines[i].line_no, app->prog.lines[i].text);
     }
     editor_set_text(app->editor_buf, gs->str);
     g_string_free(gs, TRUE);
+#endif
 }
 
-
-
+#ifdef WBASIC_NO_UI
 static bool editor_to_program(App *app) {
-    if (!app) return true;
     program_free(&app->prog);
     program_init(&app->prog);
 
-    /* In unified builds, CLI mode doesn't have GTK buffers. We treat the loaded
-       file text as "embedded_text" and parse from that. In GTK mode we parse
-       from the editor buffer. */
-    char *all = NULL;
-    const char *src = NULL;
-
-    if (wbasic_has_ui_buffers(app)) {
-#ifndef WBASIC_NO_UI
-        all = editor_get_text(app->editor_buf);
-        src = all ? all : "";
-#else
-        /* Should not happen in WBASIC_NO_UI builds, but keep safe. */
-        all = g_strdup("");
-        src = all;
-#endif
-    } else {
-        src = (app->embedded_text) ? app->embedded_text : "";
-        all = g_strdup(src);
-        src = all ? all : "";
-    }
-
+    const char *src = (app && app->embedded_text) ? app->embedded_text : "";
+    char *all = xstrdup(src);
+    if (!all) return true;
     char *saveptr = NULL;
     for (char *line = strtok_r(all, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
         char *t = trim(line);
@@ -3106,19 +3031,55 @@ static bool editor_to_program(App *app) {
             char *stmt = trim(endp);
             program_set_line(&app->prog, line_no, stmt);
         } else {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "ERROR: Program lines must start with a line number: %.200s\n", t);
-            if (wbasic_ui_active(app)) out_append(app, msg);
-            else fputs(msg, stderr);
-            g_free(all);
-            return false;
-        }
-    }
+    // Unnumbered program line is an error (do not auto-number; do not overwrite existing lines)
+    char msg[256];
+    snprintf(msg, sizeof(msg), "ERROR: Program lines must start with a line number: %.200s\n", t);
+#ifdef WBASIC_NO_UI
+    fputs(msg, stderr);
+#else
+    out_append(app, msg);
+#endif
+    return false;
+}
+}
+    free(all);
+    return true;
+}
+#endif /* WBASIC_NO_UI */
+#ifndef WBASIC_NO_UI
+static bool editor_to_program(App *app) {
+    program_free(&app->prog);
+    program_init(&app->prog);
 
+    char *all = editor_get_text(app->editor_buf);
+    if (!all) return true;
+    char *saveptr = NULL;
+    for (char *line = strtok_r(all, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
+        char *t = trim(line);
+        if (*t == 0) continue;
+
+        char *endp = NULL;
+        long ln = strtol(t, &endp, 10);
+        if (endp != t) {
+            int line_no = (int)ln;
+            char *stmt = trim(endp);
+            program_set_line(&app->prog, line_no, stmt);
+        } else {
+    // Unnumbered program line is an error (do not auto-number; do not overwrite existing lines)
+    char msg[256];
+    snprintf(msg, sizeof(msg), "ERROR: Program lines must start with a line number: %.200s\n", t);
+#ifdef WBASIC_NO_UI
+    fputs(msg, stderr);
+#else
+    out_append(app, msg);
+#endif
+    return false;
+}
+}
     g_free(all);
     return true;
 }
-
+#endif /* !WBASIC_NO_UI */
 
 
 /* ===================== Variable table ===================== */
@@ -4560,9 +4521,7 @@ static bool eval_condition(App *app, Parser *p, bool *out) {
 }
 
 
-#if defined(_WIN32)
-static void headless_try_read_inkey(App *app);
-
+#if defined(WBASIC_NO_UI) && defined(_WIN32)
 static void headless_tty_init(App *app) {
     if (!app || app->headless_tty_inited) return;
     app->headless_tty_fd = -1;
@@ -4580,15 +4539,8 @@ static void headless_tty_shutdown(App *app) {
 static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
 }
-#else /* !_WIN32 */
+#elif defined(WBASIC_NO_UI) && !defined(_WIN32)
 static void do_stop(App *app);
-
-#ifndef WBASIC_HAS_HEADLESS_STDOUT_IS_TTY
-#define WBASIC_HAS_HEADLESS_STDOUT_IS_TTY 1
-static bool headless_stdout_is_tty(void) {
-    return isatty(fileno(stdout));
-}
-#endif
 
 static void headless_tty_init(App *app) {
     if (!app || app->headless_tty_inited) return;
@@ -4727,7 +4679,9 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
-            if (!wbasic_ui_active(app)) headless_try_read_inkey(app);
+#ifdef WBASIC_NO_UI
+            headless_try_read_inkey(app);
+#endif
             if (app->inkey_ready) {
                 char buf[2] = { app->inkey_char, 0 };
                 *out = xstrdup(buf);
@@ -6153,7 +6107,8 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
             int col = (int)llround(v);
-            if (col < 1) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            if (col < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            if (col == 0) col = 1;// GW-BASIC tolerates TAB(0) and treats it as column 1
             print_tab_to(app, col);
             last_sep = 0;
         } else if (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])) {
@@ -6301,26 +6256,24 @@ static bool exec_locate(App *app, Parser *p, int current_line) {
     app->out_row = row;
     app->out_col = col;
 
-#ifndef _WIN32
-    if (!wbasic_ui_active(app)) {
-        /* Cursor positioning is meaningful only for a real terminal. */
-        app->headless_cursor_dirty = true;
+#ifdef WBASIC_NO_UI
+    /* Cursor positioning is meaningful only for a real terminal. */
+    app->headless_cursor_dirty = true;
 
-        if (headless_stdout_is_tty()) {
-            /* Apply cursor visibility if requested. */
-            if (have_cursor) {
-                if (cursor_vis) fputs("\x1b[?25h", stdout);
-                else            fputs("\x1b[?25l", stdout);
-            }
-
-            /* Move cursor immediately. */
-            headless_ansi_move(app->out_row, app->out_col);
-            app->headless_cursor_dirty = false;
-
-            /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
-            /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
-            fflush(stdout);
+    if (headless_stdout_is_tty()) {
+        /* Apply cursor visibility if requested. */
+        if (have_cursor) {
+            if (cursor_vis) fputs("\x1b[?25h", stdout);
+            else            fputs("\x1b[?25l", stdout);
         }
+
+        /* Move cursor immediately. */
+        headless_ansi_move(app->out_row, app->out_col);
+        app->headless_cursor_dirty = false;
+
+        /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
+        /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
+        fflush(stdout);
     }
 #else
     (void)have_cursor;
@@ -7472,7 +7425,7 @@ static bool exec_input(App *app, Parser *p, int current_line) {
     set_run_state(app, RUN_WAITING);
         input_echo_update(app, "");
 
-                if (wbasic_ui_active(app) && app->cmd_entry) {
+        #ifndef WBASIC_NO_UI
         while (!app->input_ready && !app->stop_flag && !app->quitting) {
             ui_pump_raw(app);
             gint64 now = g_get_monotonic_time();
@@ -7492,24 +7445,23 @@ static bool exec_input(App *app, Parser *p, int current_line) {
             gtk_entry_set_invisible_char(e, 0);
             gtk_entry_set_text(e, "");
         }
-        } else {
-            /* Headless: read a line from stdin.
-               Note: the prompt (or ? ) has already been written via out_append() above. */
-            {
-                char buf[4096];
-                /* Ensure prompt is visible before blocking for input. */
-                fflush(stdout);
-                if (!fgets(buf, sizeof(buf), stdin)) {
-                    app->input_line = g_strdup("");
-                } else {
-                    size_t l = strlen(buf);
-                    while (l && (buf[l-1] == '\n' || buf[l-1] == '\r')) buf[--l] = 0;
-                    app->input_line = g_strdup(buf);
-                }
-                app->input_ready = true;
-            }
-        }
-
+	#else
+	        /* Headless: read a line from stdin.
+	           Note: the prompt (or ? ) has already been written via out_append() above. */
+	        {
+	            char buf[4096];
+	            /* Ensure prompt is visible before blocking for input. */
+	            fflush(stdout);
+	            if (!fgets(buf, sizeof(buf), stdin)) {
+	                app->input_line = g_strdup("");
+	            } else {
+	                size_t l = strlen(buf);
+	                while (l && (buf[l-1] == '\n' || buf[l-1] == '\r')) buf[--l] = 0;
+	                app->input_line = g_strdup(buf);
+	            }
+	            app->input_ready = true;
+	        }
+	#endif
 
         if (!app->stop_flag && !app->quitting) set_run_state(app, RUN_RUNNING);
 
@@ -12814,9 +12766,8 @@ if (out_buildlog) {
 }
 
 /* Embedded runner entrypoint used by exported standalone programs. */
-
-/* Run BASIC source text in headless CLI mode (no GTK). */
-static int wbasic_run_headless_from_text(int argc, char **argv, const char *source_text) {
+int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
+#ifdef WBASIC_NO_UI
     App app;
     memset(&app, 0, sizeof(app));
 
@@ -12827,6 +12778,10 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     /* Phase 3: PRINT-statement throttling tickle (UI pumps only during delays). */
     app.tickle.fn = NULL;
     app.tickle.user = NULL;
+#ifndef WBASIC_NO_UI
+    app.tickle.fn = wbasic_ui_tickle;
+    app.tickle.user = &app;
+#endif
     app.embedded_text = source_text ? source_text : "";
 
 #ifdef WBASIC_EMBEDDED_OUTPUT_SPEED_0_100
@@ -12928,11 +12883,6 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     free(app.screen_fg);
     free(app.screen_bg);
     return 0;
-}
-
-int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
-#ifdef WBASIC_NO_UI
-    return wbasic_run_headless_from_text(argc, argv, source_text);
 #else
     /* Use caller-provided argc/argv to keep GTK/GLib argument parsing happy. */
     if (argc <= 0 || argv == NULL || argv[0] == NULL) {
@@ -13146,80 +13096,7 @@ int wbasic_main(int argc, char **argv) {
         return 0;
     }
 
-    
-    /* Unified binary experiment: allow --cli/--headless to run in terminal mode. */
-    bool want_cli = false;
-    bool force_gtk = false;
-    for (int i = 1; i < argc; i++) {
-        if (!argv[i]) continue;
-        if (!strcmp(argv[i], "--cli") || !strcmp(argv[i], "--headless") || !strcmp(argv[i], "-c") || !strcmp(argv[i], "-C")) want_cli = true;
-        if (!strcmp(argv[i], "--gtk")) force_gtk = true;
-    }
-
-#ifndef _WIN32
-    /* Auto-fallback: if no GUI display is available, default to CLI unless --gtk forced. */
-    if (!want_cli && !force_gtk) {
-        const char *disp = getenv("DISPLAY");
-        const char *wdisp = getenv("WAYLAND_DISPLAY");
-        if ((!disp || !*disp) && (!wdisp || !*wdisp)) want_cli = true;
-    }
-#endif
-
-    if (want_cli) {
-        /* CLI mode: wbasic --cli <file.bas> [-s N] */
-        if (argc < 2) {
-            fprintf(stderr,
-                    "Usage: %s [--cli|--headless] <file.bas> [-s N]\n"
-                    "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n"
-                    "  -h, --help                   Show help.\n",
-                    (argc > 0 && argv[0]) ? argv[0] : "wbasic");
-            return 1;
-        }
-
-        const char *in_bas = NULL;
-        for (int i = 1; i < argc; i++) {
-            const char *a = argv[i];
-            if (!a) continue;
-            if (a[0] == '-') {
-                if (!strcmp(a, "-s") || !strcmp(a, "--speed")) { i++; continue; }
-                continue;
-            }
-            in_bas = a;
-            break;
-        }
-
-        if (!in_bas) {
-            fprintf(stderr, "No input .bas file provided.\n");
-            return 1;
-        }
-
-        gchar *contents = NULL;
-        gsize len = 0;
-        if (!g_file_get_contents(in_bas, &contents, &len, NULL) || !contents) {
-            fprintf(stderr, "Failed to read: %s\n", in_bas);
-            return 1;
-        }
-
-        /* Strip the input filename and --cli/--headless/--gtk from argv before calling runner. */
-        char *argv2[256];
-        int argc2 = 0;
-        argv2[argc2++] = argv[0];
-        for (int i = 1; i < argc && argc2 < 255; i++) {
-            const char *a = argv[i];
-            if (!a) continue;
-            if (in_bas && !strcmp(a, in_bas)) continue;
-            if (!strcmp(a, "--cli") || !strcmp(a, "--headless") || !strcmp(a, "-c") || !strcmp(a, "-C")) continue;
-            if (!strcmp(a, "--gtk")) continue;
-            argv2[argc2++] = argv[i];
-        }
-        argv2[argc2] = NULL;
-
-        int rc = wbasic_run_headless_from_text(argc2, argv2, contents);
-        g_free(contents);
-        return rc;
-    }
-
-gtk_init(&argc, &argv);
+    gtk_init(&argc, &argv);
     apply_windows_dark_mode_preference();
 
     const char *startup_file = NULL;
@@ -13539,3 +13416,4 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
+
