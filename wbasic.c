@@ -6182,7 +6182,9 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
             int col = (int)llround(v);
-            if (col < 1) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            // Accept TAB(0) and other non-positive values as TAB(1)
+            // so behavior matches classic BASIC compatibility expectations.
+            if (col < 1) col = 1;
             print_tab_to(app, col);
             last_sep = 0;
         } else if (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])) {
