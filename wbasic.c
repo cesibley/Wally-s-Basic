@@ -111,6 +111,7 @@ extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <conio.h>
 #endif
 
 static const char *wbasic_ascii_strcasestr(const char *haystack, const char *needle)
@@ -4584,6 +4585,29 @@ static void headless_tty_shutdown(App *app) {
 
 static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
+
+    /*
+     * Windows headless/CLI builds use the CRT console keyboard buffer.
+     * INKEY$ must be non-blocking, so we only consume a byte when one is ready.
+     */
+    if (!_kbhit()) return;
+
+    int c = _getch();
+
+    /*
+     * Extended keys arrive as a prefix (0 or 224) then a scan code. For INKEY$
+     * compatibility we collapse those to "no key" and consume the scan code.
+     */
+    if (c == 0 || c == 224) {
+        if (_kbhit()) (void)_getch();
+        return;
+    }
+
+    /* Match headless POSIX behavior: return ESC and printable ASCII bytes. */
+    if (c == 27 || (c >= 0x20 && c <= 0x7E)) {
+        app->inkey_char = (char)c;
+        app->inkey_ready = true;
+    }
 }
 #else /* !_WIN32 */
 static void do_stop(App *app);
