@@ -12,19 +12,19 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
 **1.11** — February 5, 2026
 
 ## Features
-- Full implemtaion of GW-BASIC–style syntax and semantics
-  - Line-numbered BASIC programs
-  - IF / THEN / ELSE, FOR/NEXT, WHILE/WEND, DO/LOOP
-  - ON ERROR / RESUME / RESUME NEXT
-  - DEFINT / DEFSNG / DEFDBL / DEFSTR
-  - DATA / READ / RESTORE
-  - CLEAR, STOP, END, SYSTEM
+- GW-BASIC–style syntax and semantics
+- Line-numbered BASIC programs
+- IF / THEN / ELSE, FOR/NEXT, WHILE/WEND, DO/LOOP
+- ON ERROR / RESUME / RESUME NEXT
+- DEFINT / DEFSNG / DEFDBL / DEFSTR
+- DATA / READ / RESTORE
+- CLEAR, STOP, END, SYSTEM
 - GTK3 graphical interface
 - Headless (no-UI) build option
 
 ## Limitations and differences
 - Text mode only.  Graphics modes in planning
-- Files may ve "exported" to a standalone executable.  Run speeds increased by ~10x
+- Files may ve "exported" to a Linux executable.  Run speeds increased by ~10x
 - SPEED directive added to slow down screen prints to throttle older programs
 
 ## Building
@@ -44,7 +44,6 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ## Running
 ```sh
 ./wbasic
-./wbasic --cli
 ```
 
 ## Demos

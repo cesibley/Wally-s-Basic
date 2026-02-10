@@ -1,0 +1,19 @@
+In file included from /home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/sin3_export.c:3:
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c: In function ‘program_to_editor’:
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c:3057:5: warning: implicit declaration of function ‘editor_set_text’ [-Wimplicit-function-declaration]
+ 3057 |     editor_set_text(app->editor_buf, gs->str);
+      |     ^~~~~~~~~~~~~~~
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c: In function ‘exec_input’:
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c:7473:46: warning: implicit declaration of function ‘gtk_entry_get_text’; did you mean ‘gtk_entry_set_text’? [-Wimplicit-function-declaration]
+ 7473 |                 if (app->cmd_entry) curtxt = gtk_entry_get_text(GTK_ENTRY(app->cmd_entry));
+      |                                              ^~~~~~~~~~~~~~~~~~
+      |                                              gtk_entry_set_text
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c:7473:44: warning: assignment to ‘const char *’ from ‘int’ makes pointer from integer without a cast [-Wint-conversion]
+ 7473 |                 if (app->cmd_entry) curtxt = gtk_entry_get_text(GTK_ENTRY(app->cmd_entry));
+      |                                            ^
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c:7481:13: warning: implicit declaration of function ‘gtk_entry_set_visibility’ [-Wimplicit-function-declaration]
+ 7481 |             gtk_entry_set_visibility(e, TRUE);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~
+/home/curtis/Desktop/Untitled Folder/Wally-s-Basic-Experimental/wbasic.c:7482:13: warning: implicit declaration of function ‘gtk_entry_set_invisible_char’ [-Wimplicit-function-declaration]
+ 7482 |             gtk_entry_set_invisible_char(e, 0);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~

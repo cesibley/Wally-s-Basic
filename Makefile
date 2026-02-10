@@ -12,7 +12,7 @@ SRC := wbasic.c
 ICON_PNG := icon.png
 ICON_OBJ := wbasic_icon_png.o
 
-.PHONY: all unified gtk headless cli termux clean fresh
+.PHONY: all unified gtk headless cli clean fresh
 
 all: unified
 
@@ -41,17 +41,10 @@ cli: headless
 wbasic_cli: $(SRC)
 	clear && $(CC) $(CFLAGS) -DWBASIC_NO_UI $(SRC) -o $@ $(PKG_GLIB) $(LDFLAGS) $(LDLIBS)
 
-# Termux build (ARM64-friendly clang + glib only, no GTK/UI)
-termux: CC=clang
-termux: CFLAGS+=-DWBASIC_NO_UI
-termux: wbasic_termux
-
-wbasic_termux: $(SRC)
-	clear && $(CC) $(CFLAGS) $(SRC) -o wbasic $(PKG_GLIB) $(LDFLAGS) $(LDLIBS)
-
 fresh:
 	@clear
 	@$(MAKE) clean all
 
 clean:
 	rm -f wbasic wbasic_cli $(ICON_OBJ)
+
