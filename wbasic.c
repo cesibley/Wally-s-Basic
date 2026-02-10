@@ -118,6 +118,7 @@ extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 #endif
 
 static const char *wbasic_ascii_strcasestr(const char *haystack, const char *needle)
@@ -1145,7 +1146,6 @@ static inline bool wbasic_has_ui_buffers(const App *app) {
 
 
 
-#ifndef _WIN32
 /* --- ANSI color + LOCATE support for exported/CLI builds ---
    Behavior:
    - Each printed line begins by applying the current BASIC COLOR (cached).
@@ -1157,9 +1157,29 @@ static inline bool wbasic_has_ui_buffers(const App *app) {
 #ifndef WBASIC_HAS_HEADLESS_STDOUT_IS_TTY
 #define WBASIC_HAS_HEADLESS_STDOUT_IS_TTY 1
 static bool headless_stdout_is_tty(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout)) != 0;
+#else
     return isatty(fileno(stdout));
+#endif
 }
 #endif
+
+static void headless_stdout_prepare_ansi(void) {
+#ifdef _WIN32
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+
+    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hout == INVALID_HANDLE_VALUE || hout == NULL) return;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(hout, &mode)) return;
+
+    (void)SetConsoleMode(hout, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#endif
+}
 
 /* Forward decls for headless ANSI helpers (defined later in this file). */
 static inline void headless_ansi_move(int row, int col);
@@ -1179,6 +1199,10 @@ static void wbasic_cli_write_text_ansi(App *app, const char *s)
 {
     static bool bol = true; /* beginning-of-line */
     if (!s) return;
+
+    if (headless_stdout_is_tty()) {
+        headless_stdout_prepare_ansi();
+    }
 
     /* Honor LOCATE (cursor positioning) when writing to a real terminal. */
     if (app && app->headless_cursor_dirty && headless_stdout_is_tty()) {
@@ -1239,7 +1263,6 @@ static void wbasic_cli_write_text_ansi(App *app, const char *s)
     fflush(stdout);
 }
 /* --- end ANSI color + LOCATE support --- */
-#endif /* WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
 static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data);
@@ -2253,7 +2276,6 @@ static void screen_render(App *app) { (void)app; }
 
 
 
-#ifndef _WIN32
 // Headless terminal helpers (TTY only): use ANSI escape sequences for CLS/LOCATE/COLOR fidelity.
 static inline void headless_ansi_move(int row, int col) {
     if (row < 1) row = 1;
@@ -2320,7 +2342,6 @@ static inline void headless_ansi_apply_color(int fg, int bg) {
     headless_last_fg = fg;
     headless_last_bg = bg;
 }
-#endif /* !_WIN32 */
 
 static void out_append(App *app, const char *s) {
     if (!app || !s) return;
@@ -2328,14 +2349,9 @@ static void out_append(App *app, const char *s) {
     /* CLI mode (unified --cli/--headless): write directly to stdout using ANSI fidelity.
        Keep the internal screen/cursor model coherent for LOCATE/COLOR behavior. */
     if (!wbasic_ui_active(app)) {
-#ifndef _WIN32
         screen_write(app, s);
         wbasic_cli_write_text_ansi(app, s);
         if (strchr(s, '\n')) fflush(stdout);
-#else
-        fputs(s, stdout);
-        fflush(stdout);
-#endif
         return;
     }
 
@@ -2403,22 +2419,19 @@ static void out_clear(App *app, bool terminal_clear) {
 
     /* CLI mode: do not touch GTK buffers/widgets. */
     if (!wbasic_ui_active(app)) {
-#ifndef _WIN32
         if (headless_stdout_is_tty()) {
+            headless_stdout_prepare_ansi();
             fputs("\x1b[0m", stdout);
             if (terminal_clear) headless_ansi_clear();
             headless_ansi_color_cache_reset();
             app->headless_cursor_dirty = false;
             fflush(stdout);
         }
-#endif
         screen_clear(app);
         return;
     }
 
-#ifndef _WIN32
     (void)terminal_clear;
-#endif
 
     screen_clear(app);
 
@@ -6301,29 +6314,31 @@ static bool exec_locate(App *app, Parser *p, int current_line) {
     app->out_row = row;
     app->out_col = col;
 
-#ifdef WBASIC_NO_UI
-    /* Cursor positioning is meaningful only for a real terminal. */
-    app->headless_cursor_dirty = true;
+    if (!wbasic_ui_active(app)) {
+        /* Cursor positioning is meaningful only for terminal/CLI output. */
+        app->headless_cursor_dirty = true;
 
-    if (headless_stdout_is_tty()) {
-        /* Apply cursor visibility if requested. */
-        if (have_cursor) {
-            if (cursor_vis) fputs("\x1b[?25h", stdout);
-            else            fputs("\x1b[?25l", stdout);
+        if (headless_stdout_is_tty()) {
+            headless_stdout_prepare_ansi();
+
+            /* Apply cursor visibility if requested. */
+            if (have_cursor) {
+                if (cursor_vis) fputs("\x1b[?25h", stdout);
+                else            fputs("\x1b[?25l", stdout);
+            }
+
+            /* Move cursor immediately. */
+            headless_ansi_move(app->out_row, app->out_col);
+            app->headless_cursor_dirty = false;
+
+            /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
+            /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
+            fflush(stdout);
         }
-
-        /* Move cursor immediately. */
-        headless_ansi_move(app->out_row, app->out_col);
-        app->headless_cursor_dirty = false;
-
-        /* After LOCATE, do not disturb cached color; LOCATE must not reset attributes. */
-        /* (LOCATE fix) Do NOT reset ANSI attributes/color cache here. */
-        fflush(stdout);
+    } else {
+        (void)have_cursor;
+        (void)cursor_vis;
     }
-#else
-    (void)have_cursor;
-    (void)cursor_vis;
-#endif
     return true;
 }
 
@@ -6338,12 +6353,11 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     if (*s == '\0') {
         app->cur_fg = 16;
         app->cur_bg = 16;
-#ifdef WBASIC_NO_UI
-    if (headless_stdout_is_tty()) {
-        /* COLOR with no args => ANSI reset */
-        fputs("\x1b[0m", stdout);
-    }
-#endif
+        if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
+            headless_stdout_prepare_ansi();
+            /* COLOR with no args => ANSI reset */
+            fputs("\x1b[0m", stdout);
+        }
         // No need to re-render: COLOR affects subsequent output only.
         return true;
     }
@@ -10676,12 +10690,11 @@ static void do_run(App *app) {
         // Ensure each RUN starts with Preferences exact colors (until BASIC COLOR is used).
         app->cur_fg = 16;
         app->cur_bg = 16;
-#ifdef WBASIC_NO_UI
-    if (headless_stdout_is_tty()) {
-        /* COLOR with no args => ANSI reset */
-        fputs("\x1b[0m", stdout);
-    }
-#endif
+        if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
+            headless_stdout_prepare_ansi();
+            /* COLOR with no args => ANSI reset */
+            fputs("\x1b[0m", stdout);
+        }
 
     app->print_throttle_carry_ms = 0.0;
 
@@ -10744,12 +10757,11 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
     /* Reset colors to preference defaults until BASIC COLOR is used */
     app->cur_fg = 16;
     app->cur_bg = 16;
-#ifdef WBASIC_NO_UI
-    if (headless_stdout_is_tty()) {
-        /* COLOR with no args => ANSI reset */
-        fputs("\x1b[0m", stdout);
-    }
-#endif
+        if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
+            headless_stdout_prepare_ansi();
+            /* COLOR with no args => ANSI reset */
+            fputs("\x1b[0m", stdout);
+        }
 
     app->print_throttle_carry_ms = 0.0;
     key_macro_queue_clear(app);
