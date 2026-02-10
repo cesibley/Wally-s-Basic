@@ -6113,13 +6113,15 @@ static void print_tab_to(App *app, int col) {
     screen_ensure(app);
     if (!app->screen) return;
 
+    /* GW-BASIC TAB(n) positions to absolute column n (1-based) within the *current* output line.
+     * It does NOT move backwards; if the requested column is at or before the current column,
+     * TAB() is a no-op. (Wrapping is controlled by PRINT's own newline behavior, not TAB.)
+     */
     if (col < 1) col = 1;
     if (col > app->screen_cols) col = app->screen_cols;
 
-    // GW-BASIC TAB(n): if n <= current col, wrap to next line then to n.
-    if (col <= app->out_col) {
-        out_append(app, "\n");
-    }
+    if (col <= app->out_col) return;
+
     int spaces = col - app->out_col;
     if (spaces > 0) print_spc(app, spaces);
 }
@@ -6147,7 +6149,7 @@ static bool exec_print(App *app, Parser *p, int current_line) {
     // - Newline is printed unless the *final* separator is ';' or ','.
     // - ';' concatenates (no spacing).
     // - ',' advances to the next print zone (14-column zones in GW-BASIC).
-    // - TAB(n) positions to column n (1-based); if n <= current col, it wraps to next line.
+    // - TAB(n) positions to column n (1-based) within the current line; it does not move backward.
     // - SPC(n) prints n spaces.
     // - Empty items are allowed (e.g., PRINT ,,, or PRINT ;;;).
 
@@ -6181,11 +6183,21 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             if (!parse_expr(app, p, &v)) return false;
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
-            int col = (int)llround(v);
-            // Accept TAB(0) and other non-positive values as TAB(1)
-            // so behavior matches classic BASIC compatibility expectations.
-            if (col < 1) col = 1;
-            print_tab_to(app, col);
+
+            /* GW-BASIC compatibility:
+             *  - TAB expects an integer argument.
+             *  - TAB(n<0) => Illegal function call
+             *  - TAB(0) is allowed and is a no-op.
+             *  - TAB does not move backwards (no wrap).
+             */
+            double vr = round(v);
+            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            long long colll = (long long)vr;
+            if (colll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            if (colll > 0) {
+                int col = (int)colll;
+                print_tab_to(app, col);
+            }
             last_sep = 0;
         } else if (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])) {
             consume_word_ci(p, "SPC");
@@ -6195,8 +6207,13 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             if (!parse_expr(app, p, &v)) return false;
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
-            int n = (int)llround(v);
-            if (n < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+            /* GW-BASIC compatibility: SPC expects an integer >= 0. */
+            double vr = round(v);
+            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            long long nll = (long long)vr;
+            if (nll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+            int n = (int)nll;
             print_spc(app, n);
             last_sep = 0;
         } else {
