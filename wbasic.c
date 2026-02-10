@@ -1,11 +1,3 @@
-#include <termios.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-
-
-
 /* Optional embedded icon support.
  * If you link an object produced from `ld -r -b binary icon.png`, these symbols will exist.
  * Otherwise they will be NULL (weak) and we simply skip setting the window icon.
