@@ -3045,6 +3045,11 @@ static void editor_set_text(GtkTextBuffer *buf, const char *text) {
     if (!buf) return;
     gtk_text_buffer_set_text(buf, text ? text : "", -1);
 }
+#else
+static void editor_set_text(void *buf, const char *text) {
+    (void)buf;
+    (void)text;
+}
 #endif /* !WBASIC_NO_UI */
 
 static void program_to_editor(App *app) {
@@ -7470,17 +7475,21 @@ static bool exec_input(App *app, Parser *p, int current_line) {
                 app->input_cursor_on = !app->input_cursor_on;
                 app->input_cursor_next_toggle_us = now + 500000;
                 const char *curtxt = "";
+#ifndef WBASIC_NO_UI
                 if (app->cmd_entry) curtxt = gtk_entry_get_text(GTK_ENTRY(app->cmd_entry));
+#endif
                 input_echo_update(app, curtxt ? curtxt : "");
             }
             g_usleep(10 * 1000);
         }
 
         if (app->cmd_entry) {
+#ifndef WBASIC_NO_UI
             GtkEntry *e = GTK_ENTRY(app->cmd_entry);
             gtk_entry_set_visibility(e, TRUE);
             gtk_entry_set_invisible_char(e, 0);
             gtk_entry_set_text(e, "");
+#endif
         }
         } else {
             /* Headless: read a line from stdin.
@@ -13529,4 +13538,3 @@ guint state = e->state;
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
-
