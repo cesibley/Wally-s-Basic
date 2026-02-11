@@ -983,6 +983,7 @@ double print_throttle_carry_ms;
     // Cursor is updated as text is appended.
     int out_row;
     int out_col;
+    bool out_just_wrapped;
 
 // Screen buffer model for LOCATE/overwrite-style output.
 // Default "text screen" size. Adjust if desired.
@@ -2012,6 +2013,7 @@ static void screen_advance(App *app) {
             screen_scroll_up(app);
             app->out_row = app->screen_rows;
         }
+        app->out_just_wrapped = true;
     }
 }
 
@@ -2023,6 +2025,7 @@ static void screen_newline(App *app) {
         screen_scroll_up(app);
         app->out_row = app->screen_rows;
     }
+    app->out_just_wrapped = false;
 }
 
 // Write a string into the screen buffer at the current cursor.
@@ -2034,8 +2037,10 @@ static void screen_write(App *app, const char *s) {
         unsigned char c = *q;
         if (c == '\n') {
             screen_newline(app);
+            app->out_just_wrapped = false;
         } else if (c == '\r') {
             app->out_col = 1;
+            app->out_just_wrapped = false;
         } else if (c == '\t') {
             // 8-column tab stops (1-based).
             int next = ((app->out_col - 1) / 8 + 1) * 8 + 1;
@@ -2050,6 +2055,7 @@ static void screen_write(App *app, const char *s) {
             } else {
                 app->out_col = next;
             }
+            app->out_just_wrapped = false;
         } else {
             // Printable (or at least displayable) byte: place and advance.
             screen_put_at(app, app->out_row, app->out_col, (char)c);
@@ -5125,17 +5131,21 @@ if (!strcasecmp(name, "STR$")) {
             return true;
         }
 
-        
         if (!strcasecmp(name, "TAB") || !strcasecmp(name, "SPC")) {
             // In classic BASIC, TAB(n) advances to column n in PRINT, and SPC(n) prints n spaces.
-            // WBASIC currently implements both as returning a string of n spaces.
+            // Outside PRINT list parsing, WBASIC materializes them as strings of spaces.
             skip_ws(p);
             if (!consume(p, '(')) { free(name); return false; }
             double dn = 0.0;
             if (!parse_expr(app, p, &dn)) { free(name); return false; }
             if (!consume(p, ')')) { free(name); return false; }
             int n = (int)llround(dn);
-            if (n < 0) { err_set(app, "Illegal function call"); free(name); return false; }
+            if (!strcasecmp(name, "TAB")) {
+                // Match GW-BASIC lower bound: TAB(n<1) behaves as TAB(1).
+                if (n < 1) n = 1;
+            } else {
+                if (n < 0) { err_set(app, "Illegal function call"); free(name); return false; }
+            }
             // Safety cap to avoid pathological allocations
             if (n > 500000) { err_set(app, "Out of memory"); free(name); return false; }
             char *r = (char*)malloc((size_t)n + 1);
@@ -6113,14 +6123,14 @@ static void print_tab_to(App *app, int col) {
     screen_ensure(app);
     if (!app->screen) return;
 
-    /* GW-BASIC TAB(n) positions to absolute column n (1-based) within the *current* output line.
-     * It does NOT move backwards; if the requested column is at or before the current column,
-     * TAB() is a no-op. (Wrapping is controlled by PRINT's own newline behavior, not TAB.)
+    /* GW-BASIC TAB(n) targets an absolute column (1-based). If current output
+     * position has already passed that column, TAB wraps to the next line first.
      */
     if (col < 1) col = 1;
-    if (col > app->screen_cols) col = app->screen_cols;
 
-    if (col <= app->out_col) return;
+    if (col <= app->out_col) {
+        out_append(app, "\n");
+    }
 
     int spaces = col - app->out_col;
     if (spaces > 0) print_spc(app, spaces);
@@ -6156,8 +6166,10 @@ static bool exec_print(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
 
     char last_sep = 0;
+    app->out_just_wrapped = false;
 
     for (;;) {
+        bool allow_implicit_next_item = false;
         skip_ws(p);
         if (*p->s == 0) break;
 
@@ -6186,19 +6198,17 @@ static bool exec_print(App *app, Parser *p, int current_line) {
 
             /* GW-BASIC compatibility:
              *  - TAB expects an integer argument.
-             *  - TAB(n<0) => Illegal function call
-             *  - TAB(0) is allowed and is a no-op.
-             *  - TAB does not move backwards (no wrap).
+             *  - TAB(n<1) behaves as TAB(1).
+             *  - TAB does not move backwards.
+             *  - TAB(n>screen width) advances with wrapping and no explicit LF.
              */
             double vr = round(v);
             if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
             long long colll = (long long)vr;
-            if (colll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            if (colll > 0) {
-                int col = (int)colll;
-                print_tab_to(app, col);
-            }
+            int col = (colll < 1) ? 1 : (int)colll;
+            print_tab_to(app, col);
             last_sep = 0;
+            allow_implicit_next_item = true;
         } else if (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])) {
             consume_word_ci(p, "SPC");
             skip_ws(p);
@@ -6216,6 +6226,7 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             int n = (int)nll;
             print_spc(app, n);
             last_sep = 0;
+            allow_implicit_next_item = true;
         } else {
             // Normal PRINT item: string or numeric
             const char *save = p->s;
@@ -6247,11 +6258,22 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             continue;
         }
 
+        if (*p->s != 0 &&
+            (allow_implicit_next_item ||
+             (starts_ci(p->s, "TAB") && is_word_boundary(p->s[3])) ||
+             (starts_ci(p->s, "SPC") && is_word_boundary(p->s[3])))) {
+            // GW-BASIC accepts adjacent print-list TAB/SPC items with implied ';'.
+            continue;
+        }
+
         // No trailing separator => newline
         break;
     }
 
-    if (last_sep == 0) out_append(app, "\n");
+    if (last_sep == 0) {
+        if (app->out_just_wrapped) app->out_just_wrapped = false;
+        else out_append(app, "\n");
+    }
 
     /* Phase 3: one delay per PRINT statement (screen only).
      * - independent of printed length
@@ -7613,7 +7635,9 @@ cmd_entry_set_stealth(app, false);
         app->input_ready = false;
         if (app->input_line) { g_free(app->input_line); app->input_line = NULL; }
 
-        if (ok) break;
+        if (ok) {
+            break;
+        }
 
         // Bad input -> Redo from start
         out_append(app, "\n?Redo from start\n");
