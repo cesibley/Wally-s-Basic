@@ -3,34 +3,44 @@
 ## [UNRELEASED / EXPERIMENTAL] – Unified GTK + CLI Runtime
 
 - Unified GTK and CLI into a single runtime-selectable binary.
-- One executable can now run with GTK UI or headless CLI behavior.
-- GTK remains the default when a display is available.
+  - One executable can now run with GTK UI or headless CLI behavior.
+  - GTK remains the default when a display is available.
 
 - Command-line runtime mode selection added.
-- --cli, --headless, or -c runs WBASIC in terminal/CLI mode without initializing GTK.
-- --gtk forces GTK UI mode.
-- CLI-only build (wbasic_cli) remains available for systems without GTK libraries.
+  - --cli, --headless, or -c runs WBASIC in terminal/CLI mode without initializing GTK.
+  - --gtk forces GTK UI mode.
+  - CLI-only build (wbasic_cli) remains available for systems without GTK libraries.
 
 - Runtime UI isolation fixes.
-- CLI mode no longer touches GTK widgets, text buffers, or event loops.
-- Eliminated GTK-CRITICAL errors when running in --cli mode.
-- Editor and output rendering paths are now gated at runtime rather than compile time.
+  - CLI mode no longer touches GTK widgets, text buffers, or event loops.
+  - Eliminated GTK-CRITICAL errors when running in --cli mode.
+  - Editor and output rendering paths are now gated at runtime rather than compile time.
 
 - INPUT handling corrected in unified CLI mode.
-- INPUT now reads from stdin when running in --cli.
-- Prevented hangs caused by GTK inline-input paths being active without a UI.
+-   INPUT now reads from stdin when running in --cli.
+-   Prevented hangs caused by GTK inline-input paths being active without a UI.
 
 - INKEY$ behavior fixed in unified CLI mode.
-- INKEY$ now polls the terminal correctly when running in --cli.
-- Programs waiting for a keypress now terminate as expected.
+  - INKEY$ now polls the terminal correctly when running in --cli.
+  - Programs waiting for a keypress now terminate as expected.
 
 - Headless ANSI rendering enabled at runtime.
-- ANSI cursor movement, color handling, and screen clearing are available in CLI mode even when GTK support is compiled in.
+  - ANSI cursor movement, color handling, and screen clearing are available in CLI mode even when GTK support is compiled in.
 
 - Script and tooling updates.
-- run_all.sh updated to support runtime mode selection (-r or -c).
-- Added log-check helper script to detect non-zero FAIL= results.
-- Simplified automated validation of torture-test output.
+  - run_all.sh updated to support runtime mode selection (-r or -c).
+  - Added log-check helper script to detect non-zero FAIL= results.
+  - Simplified automated validation of torture-test output.
+
+- Fixed TAB() to behave consistent wiith GW-BASIC
+  - Operates with direct cursor spacing instead of printing spaces
+  - Rounds non-integer arguments to the nearest column index.
+  - Clamps values below 1 to TAB(1) and wraps columns by screen width.
+  - Advances to the next line when the requested column is behind the current print position.
+
+- Corrected SPC() to match GW-BASIC behavior
+  - Rounds non-integer arguments to the nearest integer space count.
+  - Does not raise an Illegal function call for negative arguments and preserves zero-space behavior.
 
 ## [V1.11] – Extensive Testing, Compatibility GAP and Bug Squish
 
