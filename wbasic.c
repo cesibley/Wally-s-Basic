@@ -6221,10 +6221,9 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
 
-            /* GW-BASIC compatibility: SPC rounds to nearest integer and expects >= 0. */
+            /* GW-BASIC compatibility: SPC rounds to nearest integer and clamps n<0 to 0. */
             long long nll = llround(v);
-            if (nll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            int n = (int)nll;
+            int n = (nll < 0) ? 0 : (int)nll;
             print_spc(app, n);
             last_sep = 0;
             allow_implicit_next_item = true;
