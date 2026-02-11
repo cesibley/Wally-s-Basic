@@ -6202,14 +6202,12 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
 
             /* GW-BASIC compatibility:
-             *  - TAB expects an integer argument.
+             *  - TAB rounds non-integers to the nearest integer.
              *  - TAB(n<1) behaves as TAB(1).
              *  - TAB does not move backwards.
              *  - TAB uses absolute positioning with width-based modulo normalization.
              */
-            double vr = round(v);
-            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            long long colll = (long long)vr;
+            long long colll = llround(v);
             int col = (colll < 1) ? 1 : (int)colll;
             print_tab_to(app, col);
             last_sep = 0;
@@ -6223,10 +6221,8 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
 
-            /* GW-BASIC compatibility: SPC expects an integer >= 0. */
-            double vr = round(v);
-            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            long long nll = (long long)vr;
+            /* GW-BASIC compatibility: SPC rounds to nearest integer and expects >= 0. */
+            long long nll = llround(v);
             if (nll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
             int n = (int)nll;
             print_spc(app, n);
