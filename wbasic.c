@@ -6123,17 +6123,22 @@ static void print_tab_to(App *app, int col) {
     screen_ensure(app);
     if (!app->screen) return;
 
-    /* GW-BASIC TAB(n) targets an absolute column (1-based). If current output
-     * position has already passed that column, TAB wraps to the next line first.
+    /* TAB(n): absolute column positioning within the active text width.
+     *
+     * - n is normalized into a 1-based column via modulo screen width.
+     * - if current column has already passed target, move to next line first.
+     * - then set column directly (do not print spaces to get there).
      */
+    int width = (app->screen_cols > 0) ? app->screen_cols : 80;
     if (col < 1) col = 1;
+    col = ((col - 1) % width) + 1;
 
-    if (col <= app->out_col) {
+    if (col < app->out_col) {
         out_append(app, "\n");
     }
 
-    int spaces = col - app->out_col;
-    if (spaces > 0) print_spc(app, spaces);
+    app->out_col = col;
+    app->out_just_wrapped = false;
 }
 
 static void print_comma_zone(App *app) {
@@ -6200,7 +6205,7 @@ static bool exec_print(App *app, Parser *p, int current_line) {
              *  - TAB expects an integer argument.
              *  - TAB(n<1) behaves as TAB(1).
              *  - TAB does not move backwards.
-             *  - TAB(n>screen width) advances with wrapping and no explicit LF.
+             *  - TAB uses absolute positioning with width-based modulo normalization.
              */
             double vr = round(v);
             if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
