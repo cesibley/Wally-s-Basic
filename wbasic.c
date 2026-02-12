@@ -5560,6 +5560,10 @@ static inline void runtime_error_or_pending(App *app, int line_no, const char *f
        do NOT raise another error here (would duplicate and/or overwrite ERR/ERL). */
     if (app && app->error_trap_pending) { err_clear(app); return; }
 
+    /* A statement may already have raised a specific runtime error directly.
+       Avoid emitting a second fallback error like "Bad PRINT". */
+    if (app && app->run_state == RUN_STOPPED) { err_clear(app); return; }
+
     /* If a parity message is pending (set via err_set), raise THAT message now. */
     const char *m = err_peek(app);
     if (m) {
@@ -6166,6 +6170,283 @@ static void print_comma_zone(App *app) {
     if (spaces > 0) print_spc(app, spaces);
 }
 
+typedef enum {
+    PRINT_USING_TOKEN_LIT = 0,
+    PRINT_USING_TOKEN_NUM = 1
+} PrintUsingTokenKind;
+
+typedef struct {
+    PrintUsingTokenKind kind;
+    char *text;
+} PrintUsingToken;
+
+static void print_using_tokens_free(PrintUsingToken *tokens, int count) {
+    if (!tokens) return;
+    for (int i = 0; i < count; i++) free(tokens[i].text);
+    free(tokens);
+}
+
+static bool print_using_tokens_push(App *app, PrintUsingToken **tokens, int *count, int *cap,
+                                    PrintUsingTokenKind kind, const char *src, int len) {
+    if (!tokens || !count || !cap || !src || len < 0) return false;
+    if (*count >= *cap) {
+        int ncap = (*cap == 0) ? 8 : (*cap * 2);
+        PrintUsingToken *n = (PrintUsingToken*)realloc(*tokens, sizeof(PrintUsingToken) * (size_t)ncap);
+        if (!n) { err_set(app, "Out of memory"); return false; }
+        *tokens = n;
+        *cap = ncap;
+    }
+    char *dup = (char*)malloc((size_t)len + 1);
+    if (!dup) { err_set(app, "Out of memory"); return false; }
+    if (len > 0) memcpy(dup, src, (size_t)len);
+    dup[len] = 0;
+    (*tokens)[*count].kind = kind;
+    (*tokens)[*count].text = dup;
+    (*count)++;
+    return true;
+}
+
+static bool print_using_compile(App *app, const char *fmt, PrintUsingToken **out_tokens, int *out_count) {
+    if (!out_tokens || !out_count) return false;
+    *out_tokens = NULL;
+    *out_count = 0;
+    if (!fmt) return true;
+
+    PrintUsingToken *tokens = NULL;
+    int count = 0, cap = 0;
+    int i = 0;
+    while (fmt[i]) {
+        if (fmt[i] == '#' || fmt[i] == '.') {
+            int j = i;
+            int hashes = 0;
+            while (fmt[j] == '#' || fmt[j] == '.') {
+                if (fmt[j] == '#') hashes++;
+                j++;
+            }
+            if (hashes <= 0) {
+                print_using_tokens_free(tokens, count);
+                err_set(app, "Bad format string");
+                return false;
+            }
+            if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_NUM, fmt + i, j - i)) {
+                print_using_tokens_free(tokens, count);
+                return false;
+            }
+            i = j;
+            continue;
+        }
+
+        int j = i;
+        while (fmt[j] && fmt[j] != '#' && fmt[j] != '.') j++;
+        if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_LIT, fmt + i, j - i)) {
+            print_using_tokens_free(tokens, count);
+            return false;
+        }
+        i = j;
+    }
+
+    *out_tokens = tokens;
+    *out_count = count;
+    return true;
+}
+
+static bool print_using_format_numeric(const char *mask, double v, char **out) {
+    if (!mask || !out) return false;
+    *out = NULL;
+
+    int width = (int)strlen(mask);
+    int dot_idx = -1;
+    int int_slots = 0;
+    int frac_slots = 0;
+    for (int i = 0; i < width; i++) {
+        if (mask[i] == '.') {
+            if (dot_idx >= 0) return false;
+            dot_idx = i;
+        } else if (mask[i] == '#') {
+            if (dot_idx < 0) int_slots++;
+            else frac_slots++;
+        } else {
+            return false;
+        }
+    }
+
+    double av = fabs(v);
+    char numbuf[256];
+    if (frac_slots > 0) snprintf(numbuf, sizeof(numbuf), "%.*f", frac_slots, av);
+    else {
+        double rv = round(av);
+        snprintf(numbuf, sizeof(numbuf), "%.0f", rv);
+    }
+
+    const char *dot = strchr(numbuf, '.');
+    int int_digits = dot ? (int)(dot - numbuf) : (int)strlen(numbuf);
+    const char *frac_ptr = dot ? dot + 1 : "";
+
+    /* For masks with no integer slots (e.g. ".##"), allow values in [0,1)
+       to render without a leading zero. */
+    bool suppress_leading_zero = (int_slots == 0 && int_digits == 1 && numbuf[0] == '0');
+    int visible_int_digits = suppress_leading_zero ? 0 : int_digits;
+    if (visible_int_digits > int_slots) {
+        char *ov = (char*)malloc((size_t)width + 1);
+        if (!ov) return false;
+        for (int i = 0; i < width; i++) ov[i] = '%';
+        ov[width] = 0;
+        *out = ov;
+        return true;
+    }
+
+    char *buf = (char*)malloc((size_t)width + 1);
+    if (!buf) return false;
+    for (int i = 0; i < width; i++) buf[i] = ' ';
+    buf[width] = 0;
+
+    int int_idx = suppress_leading_zero ? -1 : (int_digits - 1);
+    int frac_len = (int)strlen(frac_ptr);
+    int frac_idx = frac_len - 1;
+    for (int i = width - 1; i >= 0; i--) {
+        if (mask[i] == '#') {
+            if (dot_idx >= 0 && i > dot_idx) {
+                if (frac_idx >= 0) buf[i] = frac_ptr[frac_idx--];
+                else buf[i] = '0';
+            } else {
+                if (int_idx >= 0) buf[i] = numbuf[int_idx--];
+                else buf[i] = ' ';
+            }
+        } else if (mask[i] == '.') {
+            buf[i] = '.';
+        }
+    }
+
+    if (v < 0.0) {
+        bool placed = false;
+        for (int i = 0; i < width; i++) {
+            if (buf[i] == ' ') { buf[i] = '-'; placed = true; break; }
+            if (buf[i] >= '0' && buf[i] <= '9') break;
+        }
+        if (!placed) {
+            free(buf);
+            char *ov = (char*)malloc((size_t)width + 1);
+            if (!ov) return false;
+            for (int i = 0; i < width; i++) ov[i] = '%';
+            ov[width] = 0;
+            *out = ov;
+            return true;
+        }
+    }
+
+    *out = buf;
+    return true;
+}
+
+static void print_using_emit_literals_until_numeric(App *app, const PrintUsingToken *tokens,
+                                                int token_count, int *cursor) {
+    if (!app || !tokens || token_count <= 0 || !cursor) return;
+
+    /* Emit literals only within the current linear pass (no wrap). */
+    int start = (*cursor % token_count + token_count) % token_count;
+    for (int idx = start; idx < token_count; idx++) {
+        if (tokens[idx].kind == PRINT_USING_TOKEN_NUM) {
+            *cursor = idx;
+            return;
+        }
+        out_append(app, tokens[idx].text ? tokens[idx].text : "");
+        *cursor = (idx + 1) % token_count;
+    }
+}
+
+static bool exec_print_using(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+
+    skip_ws(p);
+    char *fmt = NULL;
+    if (!parse_string_value(app, p, &fmt)) {
+        runtime_error_or_pending(app, current_line, "Bad format string");
+        return false;
+    }
+
+    skip_ws(p);
+    if (*p->s != ';' && *p->s != ',') {
+        free(fmt);
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    p->s++;
+
+    PrintUsingToken *tokens = NULL;
+    int token_count = 0;
+    if (!print_using_compile(app, fmt, &tokens, &token_count)) {
+        free(fmt);
+        runtime_error_or_pending(app, current_line, "Bad format string");
+        return false;
+    }
+    free(fmt);
+
+    int numeric_count = 0;
+    for (int i = 0; i < token_count; i++) if (tokens[i].kind == PRINT_USING_TOKEN_NUM) numeric_count++;
+    if (numeric_count <= 0) {
+        print_using_tokens_free(tokens, token_count);
+        runtime_error(app, current_line, "Bad format string");
+        return false;
+    }
+
+    char last_sep = 0;
+    int next_field = 0;
+    for (;;) {
+        skip_ws(p);
+        if (*p->s == 0) break;
+
+        const char *save = p->s;
+        char *sv = NULL;
+        if (parse_string_value(app, p, &sv)) {
+            free(sv);
+            print_using_tokens_free(tokens, token_count);
+            runtime_error(app, current_line, "Type mismatch");
+            return false;
+        }
+        p->s = save;
+
+        double nv = 0.0;
+        if (!parse_expr(app, p, &nv)) {
+            print_using_tokens_free(tokens, token_count);
+            return false;
+        }
+
+        int seen_numeric = 0;
+        print_using_emit_literals_until_numeric(app, tokens, token_count, &next_field);
+        for (int i = 0; i < token_count; i++) {
+            int idx = (next_field + i) % token_count;
+            if (tokens[idx].kind == PRINT_USING_TOKEN_LIT) continue;
+            char *formatted = NULL;
+            if (!print_using_format_numeric(tokens[idx].text, nv, &formatted)) {
+                print_using_tokens_free(tokens, token_count);
+                runtime_error(app, current_line, "Bad format string");
+                return false;
+            }
+            out_append(app, formatted ? formatted : "");
+            free(formatted);
+            next_field = (idx + 1) % token_count;
+            print_using_emit_literals_until_numeric(app, tokens, token_count, &next_field);
+            seen_numeric = 1;
+            break;
+        }
+
+        if (!seen_numeric) {
+            print_using_tokens_free(tokens, token_count);
+            runtime_error(app, current_line, "Bad format string");
+            return false;
+        }
+
+        skip_ws(p);
+        if (*p->s == ',') { p->s++; last_sep = ','; continue; }
+        if (*p->s == ';') { p->s++; last_sep = ';'; continue; }
+        break;
+    }
+
+    print_using_tokens_free(tokens, token_count);
+    if (last_sep == 0) out_append(app, "\n");
+    return true;
+}
+
 static bool exec_print(App *app, Parser *p, int current_line) {
     // GW-BASIC-ish PRINT semantics (text mode):
     // - PRINT with no args prints a newline.
@@ -6177,6 +6458,12 @@ static bool exec_print(App *app, Parser *p, int current_line) {
     // - Empty items are allowed (e.g., PRINT ,,, or PRINT ;;;).
 
     if (!app || !p) return false;
+
+    skip_ws(p);
+    if (starts_ci(p->s, "USING") && is_word_boundary(p->s[5])) {
+        consume_word_ci(p, "USING");
+        return exec_print_using(app, p, current_line);
+    }
 
     char last_sep = 0;
     app->out_just_wrapped = false;
