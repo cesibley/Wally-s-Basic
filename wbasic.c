@@ -4591,6 +4591,7 @@ static void headless_tty_shutdown(App *app) {
 
 static void headless_try_read_inkey(App *app) {
     if (!app || app->inkey_ready) return;
+    headless_tty_init(app);
 
     /*
      * Windows headless/CLI builds use the CRT console keyboard buffer.
@@ -13229,11 +13230,15 @@ int wbasic_main(int argc, char **argv) {
     
     /* Unified binary experiment: allow --cli/--headless to run in terminal mode. */
     bool want_cli = false;
+#ifndef _WIN32
     bool force_gtk = false;
+#endif
     for (int i = 1; i < argc; i++) {
         if (!argv[i]) continue;
         if (!strcmp(argv[i], "--cli") || !strcmp(argv[i], "--headless") || !strcmp(argv[i], "-c") || !strcmp(argv[i], "-C")) want_cli = true;
+#ifndef _WIN32
         if (!strcmp(argv[i], "--gtk")) force_gtk = true;
+#endif
     }
 
 #ifndef _WIN32
