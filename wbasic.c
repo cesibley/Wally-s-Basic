@@ -6127,7 +6127,7 @@ static void print_tab_to(App *app, int col) {
      *
      * - n is normalized into a 1-based column via modulo screen width.
      * - if current column has already passed target, move to next line first.
-     * - then set column directly (do not print spaces to get there).
+     * - GUI sets the column directly; headless/CLI emits spaces to preserve stream output.
      */
     int width = (app->screen_cols > 0) ? app->screen_cols : 80;
     if (col < 1) col = 1;
@@ -6137,7 +6137,14 @@ static void print_tab_to(App *app, int col) {
         out_append(app, "\n");
     }
 
-    app->out_col = col;
+    if (!wbasic_ui_active(app)) {
+        /* Headless/CLI output is stream-oriented: TAB must be relative to current
+           cursor position, so emit literal spaces instead of absolute ANSI moves. */
+        int spaces = col - app->out_col;
+        if (spaces > 0) print_spc(app, spaces);
+    } else {
+        app->out_col = col;
+    }
     app->out_just_wrapped = false;
 }
 
@@ -6202,14 +6209,12 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
 
             /* GW-BASIC compatibility:
-             *  - TAB expects an integer argument.
+             *  - TAB rounds non-integers to the nearest integer.
              *  - TAB(n<1) behaves as TAB(1).
              *  - TAB does not move backwards.
              *  - TAB uses absolute positioning with width-based modulo normalization.
              */
-            double vr = round(v);
-            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            long long colll = (long long)vr;
+            long long colll = llround(v);
             int col = (colll < 1) ? 1 : (int)colll;
             print_tab_to(app, col);
             last_sep = 0;
@@ -6223,12 +6228,9 @@ static bool exec_print(App *app, Parser *p, int current_line) {
             skip_ws(p);
             if (!consume(p, ')')) { runtime_error(app, current_line, "Syntax error"); return false; }
 
-            /* GW-BASIC compatibility: SPC expects an integer >= 0. */
-            double vr = round(v);
-            if (fabs(v - vr) > 1e-9) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            long long nll = (long long)vr;
-            if (nll < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
-            int n = (int)nll;
+            /* GW-BASIC compatibility: SPC rounds to nearest integer and clamps n<0 to 0. */
+            long long nll = llround(v);
+            int n = (nll < 0) ? 0 : (int)nll;
             print_spc(app, n);
             last_sep = 0;
             allow_implicit_next_item = true;
