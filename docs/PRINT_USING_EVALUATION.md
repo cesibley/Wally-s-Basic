@@ -4,15 +4,16 @@
 
 This document evaluates what it would take to add **GW-BASIC-compatible `PRINT USING`** behavior to WBASIC, including numeric and string mask semantics, parser/runtime integration, and regression coverage.
 
-## Historical Baseline (Original Planning Snapshot)
+## Current WBASIC Behavior (Baseline)
 
-The section below captures the **pre-implementation baseline** this plan was originally written against:
+- `PRINT` currently supports:
+  - plain string/numeric print-list items,
+  - `,` (zone spacing), `;` (concatenation),
+  - `TAB(n)` and `SPC(n)`.
+- Numeric output currently uses generic formatting (`%.0f` for integral values, `%.12g` otherwise).
+- There is no `USING` branch in `exec_print`.
 
-- `PRINT` supported plain string/numeric print-list items, `,` (zone spacing), `;` (concatenation), plus `TAB(n)` and `SPC(n)`.
-- Numeric output used generic formatting (`%.0f` for integral values, `%.12g` otherwise).
-- `PRINT USING` was not yet implemented in `exec_print`.
-
-> Note: this baseline is intentionally preserved for planning context. See **Phase 2 Review (Current WBASIC Snapshot)** for the up-to-date implementation status.
+Implication: `PRINT USING "..."; ...` is not implemented and will not provide GW-BASIC mask formatting.
 
 ---
 
@@ -197,6 +198,40 @@ Recommended strategy:
 - one aggregate regression file covering mixed scenarios.
 
 ---
+
+
+## Implementation Readiness (Prep for the Actual Update)
+
+To prepare for implementation, complete this short pre-flight checklist before coding:
+
+1. **Confirm current parser entry points**
+   - Locate `exec_print` and the token parser path that currently handles `PRINT` list items.
+   - Verify where `USING` can be recognized without regressing normal `PRINT` behavior.
+
+2. **Define the first shippable milestone (MVP)**
+   - MVP should include: `PRINT USING format$; exprlist` with numeric `#`/`.` masks, rounding, width, and overflow marker behavior.
+   - Explicitly defer sign/currency/fill/scientific/string-mask semantics to follow-up milestones.
+
+3. **Add formatter scaffolding before feature depth**
+   - Introduce a `compile_print_using_format(...)` path that returns tokenized literals + fields.
+   - Add an execution loop that supports format cycling when arguments exceed fields.
+
+4. **Lock down compatibility decisions up front**
+   - Decide and document exact overflow marker policy (`%` width fill vs dialect variant).
+   - Decide error text mapping strategy (exact GW-BASIC text vs WBASIC-consistent equivalents).
+
+5. **Create test harness slots first**
+   - Add placeholder test files for numeric core, separator interaction, and cycling behavior.
+   - Start with golden-output baselines so behavior changes are visible per phase.
+
+### Suggested Work Breakdown (Implementation-Ready)
+
+- **PR 1:** parser detection + format tokenizer skeleton + no-op/literal-safe execution path.
+- **PR 2:** numeric core (`#`, `.`, width, rounding, overflow) + focused tests.
+- **PR 3:** extended numeric symbols (`,`, `+`, `-`, `$`, `*`, `^^^^`) + interaction tests.
+- **PR 4:** string masks (`!`, `\...\`, `&`) + mixed literal formatting + parity cleanup.
+
+This preparation reduces implementation churn, keeps regressions isolated, and enables incremental parity tracking against GW-BASIC output expectations.
 
 ## Estimated Implementation Effort
 
