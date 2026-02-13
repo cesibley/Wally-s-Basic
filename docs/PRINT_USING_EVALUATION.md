@@ -4,16 +4,15 @@
 
 This document evaluates what it would take to add **GW-BASIC-compatible `PRINT USING`** behavior to WBASIC, including numeric and string mask semantics, parser/runtime integration, and regression coverage.
 
-## Current WBASIC Behavior (Baseline)
+## Historical Baseline (Original Planning Snapshot)
 
-- `PRINT` currently supports:
-  - plain string/numeric print-list items,
-  - `,` (zone spacing), `;` (concatenation),
-  - `TAB(n)` and `SPC(n)`.
-- Numeric output currently uses generic formatting (`%.0f` for integral values, `%.12g` otherwise).
-- There is no `USING` branch in `exec_print`.
+The section below captures the **pre-implementation baseline** this plan was originally written against:
 
-Implication: `PRINT USING "..."; ...` is not implemented and will not provide GW-BASIC mask formatting.
+- `PRINT` supported plain string/numeric print-list items, `,` (zone spacing), `;` (concatenation), plus `TAB(n)` and `SPC(n)`.
+- Numeric output used generic formatting (`%.0f` for integral values, `%.12g` otherwise).
+- `PRINT USING` was not yet implemented in `exec_print`.
+
+> Note: this baseline is intentionally preserved for planning context. See **Phase 2 Review (Current WBASIC Snapshot)** for the up-to-date implementation status.
 
 ---
 
