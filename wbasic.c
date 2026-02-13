@@ -850,6 +850,11 @@ typedef struct {
 } ScrollLine;
 #endif /* !WBASIC_NO_UI */
 
+typedef enum {
+    WB_VIDEO_TEXT = 0,
+    WB_VIDEO_GFX1 = 1
+} WbVideoMode;
+
 typedef struct App {
     bool resume_from_gosub;
     GtkWidget *win;
@@ -925,6 +930,9 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
     GtkWidget *editor_view;
     UndoStack *editor_undo;
     GtkWidget *output_view;
+    GtkWidget *output_sw;
+    GtkWidget *output_stack;
+    GtkWidget *gfx_area;
 
 #ifndef WBASIC_NO_UI
     /* GTK output optimization: keep a transcript scrollback (max lines) in the GtkTextBuffer,
@@ -991,6 +999,11 @@ int screen_rows;
 int screen_cols;
 char *screen; // size = screen_rows * screen_cols, filled with spaces
 
+/* Graphics v1 state (SCREEN 1): mode + indexed pixel buffer */
+WbVideoMode video_mode;
+int gfx_width;
+int gfx_height;
+unsigned char *gfx_pixels; /* size = gfx_width * gfx_height, color index 0..15 */
 
 /* Text mode COLOR state (0-15) */
 int cur_fg;   /* foreground */
@@ -1800,6 +1813,67 @@ static void screen_clear(App *app) {
     app->out_col = 1;
 }
 
+static void gfx_free(App *app) {
+    if (!app) return;
+    if (app->gfx_pixels) {
+        free(app->gfx_pixels);
+        app->gfx_pixels = NULL;
+    }
+    app->gfx_width = 0;
+    app->gfx_height = 0;
+}
+
+static bool gfx_alloc(App *app, int w, int h) {
+    if (!app || w <= 0 || h <= 0) return false;
+    size_t n = (size_t)w * (size_t)h;
+    unsigned char *buf = (unsigned char*)malloc(n);
+    if (!buf) return false;
+    memset(buf, 0, n);
+    gfx_free(app);
+    app->gfx_pixels = buf;
+    app->gfx_width = w;
+    app->gfx_height = h;
+    return true;
+}
+
+static void gfx_clear(App *app, unsigned char color_idx) {
+    if (!app || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) return;
+    size_t n = (size_t)app->gfx_width * (size_t)app->gfx_height;
+    memset(app->gfx_pixels, (int)(color_idx & 0x0F), n);
+}
+
+static bool gfx_pset(App *app, int x, int y, int color_idx) {
+    if (!app || !app->gfx_pixels) return false;
+    if (x < 0 || y < 0 || x >= app->gfx_width || y >= app->gfx_height) return true;
+    size_t idx = (size_t)y * (size_t)app->gfx_width + (size_t)x;
+    app->gfx_pixels[idx] = (unsigned char)(color_idx & 0x0F);
+    return true;
+}
+
+static int gfx_point(App *app, int x, int y) {
+    if (!app || !app->gfx_pixels) return -1;
+    if (x < 0 || y < 0 || x >= app->gfx_width || y >= app->gfx_height) return -1;
+    size_t idx = (size_t)y * (size_t)app->gfx_width + (size_t)x;
+    return (int)app->gfx_pixels[idx];
+}
+
+static void gfx_line(App *app, int x0, int y0, int x1, int y1, int color_idx) {
+    if (!app || !app->gfx_pixels) return;
+    int dx = abs(x1 - x0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        (void)gfx_pset(app, x0, y0, color_idx);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
 #ifndef WBASIC_NO_UI
 static void scrollback_clear(App *app) {
     if (!app || !app->scrollback_lines) {
@@ -2073,6 +2147,12 @@ static WB_UNUSED const char *vga16_hex[16] = {
     "#FF5555", "#FF55FF", "#FFFF55", "#FFFFFF"
 };
 
+static const unsigned char vga16_rgb[16][3] = {
+    {0x00,0x00,0x00}, {0x00,0x00,0xAA}, {0x00,0xAA,0x00}, {0x00,0xAA,0xAA},
+    {0xAA,0x00,0x00}, {0xAA,0x00,0xAA}, {0xAA,0x55,0x00}, {0xAA,0xAA,0xAA},
+    {0x55,0x55,0x55}, {0x55,0x55,0xFF}, {0x55,0xFF,0x55}, {0x55,0xFF,0xFF},
+    {0xFF,0x55,0x55}, {0xFF,0x55,0xFF}, {0xFF,0xFF,0x55}, {0xFF,0xFF,0xFF}
+};
 
 #ifndef WBASIC_NO_UI
 
@@ -2151,13 +2231,75 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 #ifndef WBASIC_NO_UI
 
+static void ui_update_output_mode(App *app) {
+    if (!app || !app->output_stack) return;
+    if (app->video_mode == WB_VIDEO_GFX1) {
+        gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "gfx");
+    } else {
+        gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "text");
+    }
+}
+
+static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+    (void)widget;
+    App *app = (App*)user_data;
+    if (!app) return FALSE;
+
+    int ww = gtk_widget_get_allocated_width(app->gfx_area);
+    int wh = gtk_widget_get_allocated_height(app->gfx_area);
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_paint(cr);
+
+    if (ww <= 0 || wh <= 0 || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) {
+        return FALSE;
+    }
+
+    int w = app->gfx_width;
+    int h = app->gfx_height;
+    size_t n = (size_t)w * (size_t)h;
+    guint32 *pix = (guint32*)g_malloc((gsize)(n * sizeof(guint32)));
+    if (!pix) return FALSE;
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = app->gfx_pixels[i] & 0x0F;
+        unsigned char r = vga16_rgb[c][0];
+        unsigned char g = vga16_rgb[c][1];
+        unsigned char b = vga16_rgb[c][2];
+        pix[i] = (0xFFu << 24) | ((guint32)r << 16) | ((guint32)g << 8) | (guint32)b;
+    }
+
+    cairo_surface_t *surf = cairo_image_surface_create_for_data((unsigned char*)pix,
+                                                                CAIRO_FORMAT_ARGB32,
+                                                                w, h, w * 4);
+    double sx = (double)ww / (double)w;
+    double sy = (double)wh / (double)h;
+    double scale = (sx < sy) ? sx : sy;
+    if (scale <= 0.0) scale = 1.0;
+    double ox = ((double)ww - (double)w * scale) * 0.5;
+    double oy = ((double)wh - (double)h * scale) * 0.5;
+
+    cairo_save(cr);
+    cairo_translate(cr, ox, oy);
+    cairo_scale(cr, scale, scale);
+    cairo_set_source_surface(cr, surf, 0.0, 0.0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+    cairo_restore(cr);
+
+    cairo_surface_destroy(surf);
+    g_free(pix);
+    return FALSE;
+}
 
 static void screen_render_now(App *app) {
     if (!wbasic_ui_active(app)) return;
-    screen_ensure(app);
-    if (!app->screen || !app->output_buf || !app->output_view) return;
+    if (!app->output_buf || !app->output_view) return;
 
-    int R = app->screen_rows, C = app->screen_cols;
+    ui_update_output_mode(app);
+    if (app->video_mode == WB_VIDEO_GFX1) {
+        if (app->gfx_area) gtk_widget_queue_draw(app->gfx_area);
+        return;
+    }
 
     /* While a program is RUNNING, keep the view pinned to the bottom. */
     GtkAdjustment *vadj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(app->output_view));
@@ -2174,13 +2316,17 @@ static void screen_render_now(App *app) {
     }
 
     /* Delete and rebuild ONLY the current screen region (below the mark). */
-    GtkTextIter start, end;
-    gtk_text_buffer_get_iter_at_mark(app->output_buf, &start, screen_mark);
-    gtk_text_buffer_get_end_iter(app->output_buf, &end);
-    gtk_text_buffer_delete(app->output_buf, &start, &end);
+    GtkTextIter start_it, end_it;
+    gtk_text_buffer_get_iter_at_mark(app->output_buf, &start_it, screen_mark);
+    gtk_text_buffer_get_end_iter(app->output_buf, &end_it);
+    gtk_text_buffer_delete(app->output_buf, &start_it, &end_it);
 
     GtkTextIter it;
     gtk_text_buffer_get_iter_at_mark(app->output_buf, &it, screen_mark);
+
+    screen_ensure(app);
+    if (!app->screen) return;
+    int R = app->screen_rows, C = app->screen_cols;
 
     for (int r = 0; r < R; r++) {
         const char *rowp = app->screen + (size_t)r * (size_t)C;
@@ -2208,7 +2354,7 @@ static void screen_render_now(App *app) {
             gtk_text_buffer_insert_with_tags_by_name(app->output_buf, &it,
                                                      rowp + c, run,
                                                      tagname[0] ? tagname : NULL,
-    NULL);
+                                                     NULL);
             c += run;
         }
 
@@ -2226,6 +2372,7 @@ static void screen_render_now(App *app) {
         gtk_adjustment_set_value(vadj, maxv);
     }
 }
+
 
 /* Throttled screen rendering: coalesce many writes into one GTK update */
 /* Render throttle: at most ~60fps via timeout */
@@ -3829,7 +3976,7 @@ if (!strcasecmp(name, "ERL")) {
                 !strcasecmp(name, "EXP") || !strcasecmp(name, "ABS") || !strcasecmp(name, "INT") ||
                 !strcasecmp(name, "SGN") || !strcasecmp(name, "FIX") || !strcasecmp(name, "CINT") ||
                 !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") || !strcasecmp(name, "LOF") || !strcasecmp(name, "SEEK") || !strcasecmp(name, "CVI") || !strcasecmp(name, "CVS") || !strcasecmp(name, "CVD") ||
-                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND")) {
+                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND") || !strcasecmp(name, "POINT")) {
 
                 consume(p, '(');
                 /* EOF(n) returns -1 at EOF, else 0. */
@@ -4003,6 +4150,20 @@ if (!strcasecmp(name, "ERL")) {
                     return true;
                 }
 
+                if (!strcasecmp(name, "POINT")) {
+                    double xv = 0.0, yv = 0.0;
+                    if (!parse_expr(app, p, &xv)) { free(name); return false; }
+                    if (!consume(p, ',')) { free(name); return false; }
+                    if (!parse_expr(app, p, &yv)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    int xi = (int)llround(xv);
+                    int yi = (int)llround(yv);
+                    int c = gfx_point(app, xi, yi);
+                    *out = (c < 0) ? -1.0 : (double)c;
+                    free(name);
+                    return true;
+                }
 
                 double arg = 0.0;
                 if (!parse_expr(app, p, &arg)) { free(name); return false; }
@@ -6873,7 +7034,119 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     return true;
 }
 
+static bool exec_screen(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    skip_ws(p);
 
+    double mode_v = 0.0;
+    if (!parse_expr(app, p, &mode_v)) {
+        runtime_error(app, current_line, "SCREEN expects mode");
+        return false;
+    }
+    int mode = (int)llround(mode_v);
+    skip_ws(p);
+    if (*p->s != '\0') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+
+    if (mode == 0) {
+        app->video_mode = WB_VIDEO_TEXT;
+        screen_render(app);
+        return true;
+    }
+    if (mode == 1) {
+        if (!gfx_alloc(app, 320, 200)) {
+            runtime_error(app, current_line, "Out of memory");
+            return false;
+        }
+        app->video_mode = WB_VIDEO_GFX1;
+        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        screen_render(app);
+        return true;
+    }
+
+    runtime_error(app, current_line, "Unsupported SCREEN mode");
+    return false;
+}
+
+static bool exec_pset(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (app->video_mode != WB_VIDEO_GFX1) {
+        runtime_error(app, current_line, "PSET requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PSET expects (x,y)"); return false; }
+
+    double xv = 0.0, yv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PSET expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PSET expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PSET expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PSET missing ')'"); return false; }
+
+    int color = app->cur_fg;
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PSET expects color"); return false; }
+        color = (int)llround(cv);
+    }
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    bool ok = gfx_pset(app, x, y, color);
+    if (ok) screen_render(app);
+    return ok;
+}
+
+static bool exec_line_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (app->video_mode != WB_VIDEO_GFX1) {
+        runtime_error(app, current_line, "LINE requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "LINE expects (x1,y1)-(x2,y2)"); return false; }
+
+    double x1v = 0.0, y1v = 0.0, x2v = 0.0, y2v = 0.0;
+    if (!parse_expr(app, p, &x1v)) { runtime_error(app, current_line, "LINE expects x1"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "LINE expects ','"); return false; }
+    if (!parse_expr(app, p, &y1v)) { runtime_error(app, current_line, "LINE expects y1"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
+    skip_ws(p);
+    if (!consume(p, '-')) { runtime_error(app, current_line, "LINE expects '-'" ); return false; }
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "LINE expects (x2,y2)"); return false; }
+    if (!parse_expr(app, p, &x2v)) { runtime_error(app, current_line, "LINE expects x2"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "LINE expects ','"); return false; }
+    if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "LINE expects y2"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
+
+    int color = app->cur_fg;
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "LINE expects color"); return false; }
+        color = (int)llround(cv);
+    }
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x1 = (int)llround(x1v);
+    int y1 = (int)llround(y1v);
+    int x2 = (int)llround(x2v);
+    int y2 = (int)llround(y2v);
+    gfx_line(app, x1, y1, x2, y2, color);
+    screen_render(app);
+    return true;
+}
 
 /* ---- File I/O helpers ---- */
 
@@ -9680,14 +9953,40 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
-        out_clear(app, true);
+        if (app->video_mode == WB_VIDEO_GFX1) {
+            gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            screen_render(app);
+        } else {
+            out_clear(app, true);
+        }
         free(tmp);
         return true;
     }
 
+    if (starts_ci(s, "SCREEN") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_screen(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
+    if (starts_ci(s, "PSET") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_pset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
-    
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (!(starts_ci(t, "INPUT") && is_word_boundary(t[5]))) {
+            Parser p = { s + 4 };
+            bool ok = exec_line_gfx(app, &p, current_line);
+            free(tmp);
+            return ok;
+        }
+    }
 
 // CLEAR [expr[,expr[,expr]]]  (GW-BASIC compatibility: clear variables/arrays, close files, reset stacks; ignore sizing args)
 if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
@@ -10512,6 +10811,30 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
         bool ok = exec_return(app, current_line, line_idx, stmt_idx);
         free(tmp);
         return ok;
+    }
+
+    /* Second-chance graphics command dispatch (prevents fall-through to assignment parser). */
+    if (starts_ci(s, "SCREEN") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_screen(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PSET") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_pset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (!(starts_ci(t, "INPUT") && is_word_boundary(t[5]))) {
+            Parser p = { s + 4 };
+            bool ok = exec_line_gfx(app, &p, current_line);
+            free(tmp);
+            return ok;
+        }
     }
 
     // LET (optional)
@@ -11917,7 +12240,12 @@ static void do_immediate(App *app, const char *cmdline) {
 
     if ((starts_ci(s, "CLS") && is_word_boundary(s[3])) ||
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
-        out_clear(app, true);
+        if (starts_ci(s, "CLS") && app->video_mode == WB_VIDEO_GFX1) {
+            gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            screen_render(app);
+        } else {
+            out_clear(app, true);
+        }
         free(tmp);
         return;
     }
@@ -13117,7 +13445,7 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buf_changed), app);
     gtk_paned_pack1(GTK_PANED(paned), editor_sw, TRUE, FALSE);
 
-    GtkWidget *output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
+    app->output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
 
     /* Pane "border": add internal padding so text never prints flush to the edge.
        Use the same thickness as the paned separator (~12px). */
@@ -13153,7 +13481,19 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
 
     // Apply saved theme (colors + font) now that views are named
     apply_theme(app);
-    gtk_paned_pack2(GTK_PANED(paned), output_sw, TRUE, FALSE);
+    app->output_stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(app->output_stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    gtk_stack_add_named(GTK_STACK(app->output_stack), app->output_sw, "text");
+
+    app->gfx_area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(app->gfx_area, TRUE);
+    gtk_widget_set_vexpand(app->gfx_area, TRUE);
+    gtk_widget_set_name(app->gfx_area, "wbasic_gfx");
+    g_signal_connect(app->gfx_area, "draw", G_CALLBACK(on_gfx_area_draw), app);
+    gtk_stack_add_named(GTK_STACK(app->output_stack), app->gfx_area, "gfx");
+
+    ui_update_output_mode(app);
+    gtk_paned_pack2(GTK_PANED(paned), app->output_stack, TRUE, FALSE);
     if (app->have_paned_pos && app->paned_pos > 0) gtk_paned_set_position(GTK_PANED(paned), app->paned_pos);
 
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -13385,6 +13725,10 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     app.screen = NULL;
     app.screen_fg = NULL;
     app.screen_bg = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.cur_fg = 16;
     app.cur_bg = 16;
     app.option_base = 0;
@@ -13409,6 +13753,7 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     free(app.screen);
     free(app.screen_fg);
     free(app.screen_bg);
+    gfx_free(&app);
     return 0;
 }
 
@@ -13455,6 +13800,10 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.screen_rows = 25;
     app.screen_cols = 80;
     app.screen = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.option_base = 0;
     app.option_base_locked = false;
     app.font_name = xstrdup("Monospace 12");
@@ -13496,6 +13845,9 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
         app.scrollback_lines = NULL;
     }
     if (app.screen) free(app.screen);
+    if (app.screen_fg) free(app.screen_fg);
+    if (app.screen_bg) free(app.screen_bg);
+    gfx_free(&app);
     if (app.accel) g_object_unref(app.accel);
     free(app.font_name);
     return 0;
@@ -13758,6 +14110,10 @@ gtk_init(&argc, &argv);
 app.screen_rows = 25;
 app.screen_cols = 80;
 app.screen = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.option_base = 0;  // OPTION BASE default
     app.option_base_locked = false;
     // Default font (can be overridden by prefs_load and Preferences dialog)
@@ -13802,6 +14158,9 @@ app.screen = NULL;
         app.scrollback_lines = NULL;
     }
     if (app.screen) free(app.screen);
+    if (app.screen_fg) free(app.screen_fg);
+    if (app.screen_bg) free(app.screen_bg);
+    gfx_free(&app);
     if (app.accel) g_object_unref(app.accel);
     free(app.font_name);
     return 0;

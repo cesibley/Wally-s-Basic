@@ -1,0 +1,23 @@
+10 REM WBASIC_TT_30_GRAPHICS_EDGE_CASES_TEST
+20 REM Milestone E: defaults, clipping, degenerate LINE, mode transitions
+30 FAIL = 0
+40 SCREEN 1
+50 PSET (1,1)
+60 IF POINT(1,1) <> 15 THEN PRINT "TEST FAIL: PSET default color expected 15": FAIL = FAIL + 1
+70 LINE (3,3)-(3,3)
+80 IF POINT(3,3) <> 15 THEN PRINT "TEST FAIL: LINE degenerate default color expected 15": FAIL = FAIL + 1
+90 CLS
+100 LINE (-5,2)-(5,2), 4
+110 IF POINT(0,2) <> 4 THEN PRINT "TEST FAIL: LINE clipping start": FAIL = FAIL + 1
+120 IF POINT(5,2) <> 4 THEN PRINT "TEST FAIL: LINE clipping end": FAIL = FAIL + 1
+130 IF POINT(6,2) <> 0 THEN PRINT "TEST FAIL: LINE clipping outside unchanged": FAIL = FAIL + 1
+140 PSET (-1,-1), 7
+150 IF POINT(0,0) <> 0 THEN PRINT "TEST FAIL: OOB PSET should not alter buffer": FAIL = FAIL + 1
+160 SCREEN 0
+170 SCREEN 1
+180 IF POINT(0,0) <> 0 THEN PRINT "TEST FAIL: SCREEN transition did not reset buffer": FAIL = FAIL + 1
+190 SCREEN 0
+200 PRINT "FAIL="; FAIL
+210 IF FAIL > 0 THEN PRINT "TEST FAIL": END
+220 PRINT "TEST PASS"
+230 END
