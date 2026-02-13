@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## [UNRELEASED / EXPERIMENTAL] – Unified GTK + CLI Runtime
+## [V1.20] – Unified GTK + CLI Runtime.  PRINT USING implemetation with full semantics
 
 - Unified GTK and CLI into a single runtime-selectable binary.
   - One executable can now run with GTK UI or headless CLI behavior.
@@ -43,6 +43,8 @@
   - Does not raise an Illegal function call for negative arguments and preserves zero-space behavior.
 
 - Implemented PRINT USING formatting with full semantics
+
+## [V1.12-V1.19] - Skipped
 
 ## [V1.11] – Extensive Testing, Compatibility GAP and Bug Squish
 
