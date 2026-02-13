@@ -12,13 +12,15 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
 **1.20** — February 13, 2026
 
 ## Features
-- GW-BASIC–style syntax and semantics
-- Line-numbered BASIC programs
-- IF / THEN / ELSE, FOR/NEXT, WHILE/WEND, DO/LOOP
-- ON ERROR / RESUME / RESUME NEXT
-- DEFINT / DEFSNG / DEFDBL / DEFSTR
-- DATA / READ / RESTORE
-- CLEAR, STOP, END, SYSTEM
+- Nearly all GW-BASIC Structures, Commands and Funtions are implemented and tested
+  - GW-BASIC–style syntax and semantics
+  - Line-numbered BASIC programs
+  - IF / THEN / ELSE, FOR/NEXT, WHILE/WEND, DO/LOOP
+  - ON ERROR / RESUME / RESUME NEXT
+  - DEFINT / DEFSNG / DEFDBL / DEFSTR
+  - DATA / READ / RESTORE
+  - CLEAR, STOP, END, SYSTEM
+  - Etc.
 - GTK3 graphical interface
 - Headless (no-UI) build option
 
