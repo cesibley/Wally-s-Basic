@@ -6538,7 +6538,12 @@ static bool exec_print_using(App *app, Parser *p, int current_line) {
         if (next_field >= token_count) next_field = 0;
 
         skip_ws(p);
-        if (*p->s == ',') { p->s++; last_sep = ','; continue; }
+        if (*p->s == ',') {
+            p->s++;
+            print_comma_zone(app);
+            last_sep = ',';
+            continue;
+        }
         if (*p->s == ';') { p->s++; last_sep = ';'; continue; }
         last_sep = 0;
         break;

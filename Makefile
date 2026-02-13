@@ -16,8 +16,8 @@ else
   NOEXECSTACK_LDFLAG := -Wl,-z,noexecstack
 endif
 
-PKG_GTK  := $(shell pkg-config --cflags --libs gtk+-3.0 glib-2.0)
-PKG_GLIB := $(shell pkg-config --cflags --libs glib-2.0)
+PKG_GTK  = $(shell pkg-config --cflags --libs gtk+-3.0 glib-2.0)
+PKG_GLIB = $(shell pkg-config --cflags --libs glib-2.0)
 
 # Main source file (baseline)
 SRC := wbasic.c

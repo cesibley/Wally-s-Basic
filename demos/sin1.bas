@@ -1,4 +1,2 @@
 5 speed 50
-10 FOR X=1 TO 10000 STEP .2
-20 PRINT TAB(INT(40+40*SIN(X))); "X"
-30 NEXT X
+10 print tab(40+40*sin(x))"X":x=x+.2:goto 10

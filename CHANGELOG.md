@@ -42,6 +42,8 @@
   - Rounds non-integer arguments to the nearest integer space count.
   - Does not raise an Illegal function call for negative arguments and preserves zero-space behavior.
 
+- Implemented PRINT USING formatting with full semantics
+
 ## [V1.11] – Extensive Testing, Compatibility GAP and Bug Squish
 
 - Testing and Verification Added
