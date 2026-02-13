@@ -11990,6 +11990,9 @@ static void on_menu_pause(GtkMenuItem *mi, gpointer user_data) { (void)mi; do_pa
 #ifndef WBASIC_NO_UI
 #endif /* !WBASIC_NO_UI */
 static void on_menu_list(GtkMenuItem *mi, gpointer user_data) { (void)mi; do_list((App*)user_data); }
+#ifndef WBASIC_NO_UI
+#endif /* !WBASIC_NO_UI */
+static void on_menu_renum(GtkMenuItem *mi, gpointer user_data) { (void)mi; do_immediate((App*)user_data, "RENUM"); }
 
 #endif /* !WBASIC_NO_UI */
 static void undo_stack_free(UndoStack *u);
@@ -12787,13 +12790,16 @@ gtk_menu_shell_append(GTK_MENU_SHELL(file_menu), mi_save);
     GtkWidget *mi_pause = gtk_menu_item_new_with_label("Pause/Resume");
     gtk_widget_add_accelerator(mi_pause, "activate", app->accel, GDK_KEY_F6, 0, GTK_ACCEL_VISIBLE);
     GtkWidget *mi_sep_prog = gtk_separator_menu_item_new();
+    GtkWidget *mi_renum = gtk_menu_item_new_with_label("Renum");
     gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_run);
     gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_stop);
     gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_pause);
     gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_sep_prog);
     gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_list);
+    gtk_menu_shell_append(GTK_MENU_SHELL(prog_menu), mi_renum);
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(prog), prog_menu);
     g_signal_connect(mi_list, "activate", G_CALLBACK(on_menu_list), app);
+    g_signal_connect(mi_renum, "activate", G_CALLBACK(on_menu_renum), app);
     g_signal_connect(mi_run,  "activate", G_CALLBACK(on_menu_run),  app);
     g_signal_connect(mi_stop, "activate", G_CALLBACK(on_menu_stop), app);
     g_signal_connect(mi_pause,"activate", G_CALLBACK(on_menu_pause), app);
