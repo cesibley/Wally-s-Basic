@@ -9,7 +9,7 @@ only.  Graphic commands are in planning.
 The project is primarily for Linux and requires GTK and Glib.  It does compile and run under Windows with MSYS2, but it is not as fully tested.
 
 ## Version
-**1.11** — February 5, 2026
+**1.20** — February 13, 2026
 
 ## Features
 - GW-BASIC–style syntax and semantics
@@ -24,7 +24,7 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
 
 ## Limitations and differences
 - Text mode only.  Graphics modes in planning
-- Files may ve "exported" to a Linux executable.  Run speeds increased by ~10x
+- Files may be "exported" to a Linux executable.  Run speeds increased by ~10x
 - SPEED directive added to slow down screen prints to throttle older programs
 
 ## Building
@@ -54,4 +54,4 @@ MIT License
 
 
 ## Documentation
-- `docs/BINARY_IO_PLAN.md` — Binary / Random-access I/O implementation plan (Phase 0 scope & rules)
+- `docs/GWBASIC_COMPAT_AUDIT.md` — GW-BASIC compatibility audit and behavioral notes

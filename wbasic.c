@@ -36,11 +36,11 @@ extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 11
+#define WBASIC_VERSION_MINOR 20
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.11"
-#define WBASIC_BASELINE_DATE "2026-02-05"
-#define WBASIC_BASELINE_REV "2026-02-05 v1.11"
+#define WBASIC_VERSION_STR "1.20"
+#define WBASIC_BASELINE_DATE "2026-02-13"
+#define WBASIC_BASELINE_REV "2026-02-13 v1.20"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -12354,7 +12354,7 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "February 5, 2026";
+const char *about_line3 = "February 13, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
