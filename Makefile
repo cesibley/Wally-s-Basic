@@ -44,7 +44,7 @@ unified: wbasic
 gtk: wbasic
 
 wbasic: $(SRC) $(ICON_OBJ)
-	clear && $(CC) $(CFLAGS) $(SRC) $(ICON_OBJ) -o $@ $(PKG_GTK) $(LDFLAGS) $(NOEXECSTACK_LDFLAG) $(LDLIBS)
+	$(CC) $(CFLAGS) $(SRC) $(ICON_OBJ) -o $@ $(PKG_GTK) $(LDFLAGS) $(NOEXECSTACK_LDFLAG) $(LDLIBS)
 
 # Headless / CLI-only build (no GTK libs required)
 # We intentionally do NOT link the icon object here to avoid GNU-stack warnings and needless baggage.
@@ -52,10 +52,9 @@ headless: wbasic_cli
 cli: headless
 
 wbasic_cli: $(SRC)
-	clear && $(CC) $(CFLAGS) -DWBASIC_NO_UI $(SRC) -o $@ $(PKG_GLIB) $(LDFLAGS) $(NOEXECSTACK_LDFLAG) $(LDLIBS)
+	$(CC) $(CFLAGS) -DWBASIC_NO_UI $(SRC) -o $@ $(PKG_GLIB) $(LDFLAGS) $(NOEXECSTACK_LDFLAG) $(LDLIBS)
 
 fresh:
-	@clear
 	@$(MAKE) clean all
 
 clean:
