@@ -852,7 +852,8 @@ typedef struct {
 
 typedef enum {
     WB_VIDEO_TEXT = 0,
-    WB_VIDEO_GFX1 = 1
+    WB_VIDEO_GFX1 = 1,
+    WB_VIDEO_GFX2 = 2
 } WbVideoMode;
 
 typedef struct App {
@@ -1874,6 +1875,112 @@ static void gfx_line(App *app, int x0, int y0, int x1, int y1, int color_idx) {
     }
 }
 
+static void gfx_circle_plot8(App *app, int cx, int cy, int x, int y, int color_idx) {
+    (void)gfx_pset(app, cx + x, cy + y, color_idx);
+    (void)gfx_pset(app, cx - x, cy + y, color_idx);
+    (void)gfx_pset(app, cx + x, cy - y, color_idx);
+    (void)gfx_pset(app, cx - x, cy - y, color_idx);
+    (void)gfx_pset(app, cx + y, cy + x, color_idx);
+    (void)gfx_pset(app, cx - y, cy + x, color_idx);
+    (void)gfx_pset(app, cx + y, cy - x, color_idx);
+    (void)gfx_pset(app, cx - y, cy - x, color_idx);
+}
+
+static void gfx_circle(App *app, int cx, int cy, int radius, int color_idx) {
+    if (!app || !app->gfx_pixels || radius < 0) return;
+    int x = radius;
+    int y = 0;
+    int d = 1 - radius;
+
+    while (x >= y) {
+        gfx_circle_plot8(app, cx, cy, x, y, color_idx);
+        y++;
+        if (d < 0) {
+            d += 2 * y + 1;
+        } else {
+            x--;
+            d += 2 * (y - x) + 1;
+        }
+    }
+}
+
+
+static bool gfx_paint(App *app, int sx, int sy, int color_idx, bool have_border, int border_idx) {
+    if (!app || !app->gfx_pixels) return false;
+    if (sx < 0 || sy < 0 || sx >= app->gfx_width || sy >= app->gfx_height) return true;
+
+    int w = app->gfx_width;
+    int h = app->gfx_height;
+    int newc = color_idx & 0x0F;
+    int border = border_idx & 0x0F;
+
+    size_t n = (size_t)w * (size_t)h;
+    int *queue = (int*)malloc(n * sizeof(int));
+    unsigned char *seen = (unsigned char*)calloc(n, sizeof(unsigned char));
+    if (!queue || !seen) {
+        free(queue);
+        free(seen);
+        return false;
+    }
+
+    int oldc = gfx_point(app, sx, sy);
+    if (oldc < 0) {
+        free(queue);
+        free(seen);
+        return true;
+    }
+
+    if (have_border) {
+        if (oldc == border || oldc == newc) {
+            free(queue);
+            free(seen);
+            return true;
+        }
+    } else if (oldc == newc) {
+        free(queue);
+        free(seen);
+        return true;
+    }
+
+    size_t head = 0, tail = 0;
+    int start = sy * w + sx;
+    queue[tail++] = start;
+    seen[start] = 1;
+
+    while (head < tail) {
+        int idx = queue[head++];
+        int x = idx % w;
+        int y = idx / w;
+        int c = gfx_point(app, x, y);
+
+        bool fillable = have_border ? (c != border && c != newc) : (c == oldc);
+        if (!fillable) continue;
+
+        (void)gfx_pset(app, x, y, newc);
+
+        if (x > 0) {
+            int ni = idx - 1;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (x + 1 < w) {
+            int ni = idx + 1;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (y > 0) {
+            int ni = idx - w;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (y + 1 < h) {
+            int ni = idx + w;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+    }
+
+    free(seen);
+    free(queue);
+    return true;
+}
+
 #ifndef WBASIC_NO_UI
 static void scrollback_clear(App *app) {
     if (!app || !app->scrollback_lines) {
@@ -2233,7 +2340,7 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 static void ui_update_output_mode(App *app) {
     if (!app || !app->output_stack) return;
-    if (app->video_mode == WB_VIDEO_GFX1) {
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "gfx");
     } else {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "text");
@@ -2271,16 +2378,31 @@ static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_d
     cairo_surface_t *surf = cairo_image_surface_create_for_data((unsigned char*)pix,
                                                                 CAIRO_FORMAT_ARGB32,
                                                                 w, h, w * 4);
-    double sx = (double)ww / (double)w;
-    double sy = (double)wh / (double)h;
-    double scale = (sx < sy) ? sx : sy;
-    if (scale <= 0.0) scale = 1.0;
-    double ox = ((double)ww - (double)w * scale) * 0.5;
-    double oy = ((double)wh - (double)h * scale) * 0.5;
+
+    /* SCREEN 1/2 use non-square pixels historically; present both in a 4:3 viewport. */
+    double target_aspect = 4.0 / 3.0;
+
+    double draw_w = (double)ww;
+    double draw_h = draw_w / target_aspect;
+    if (draw_h > (double)wh) {
+        draw_h = (double)wh;
+        draw_w = draw_h * target_aspect;
+    }
+
+    if (draw_w <= 0.0 || draw_h <= 0.0) {
+        cairo_surface_destroy(surf);
+        g_free(pix);
+        return FALSE;
+    }
+
+    double ox = ((double)ww - draw_w) * 0.5;
+    double oy = ((double)wh - draw_h) * 0.5;
+    double sx = draw_w / (double)w;
+    double sy = draw_h / (double)h;
 
     cairo_save(cr);
     cairo_translate(cr, ox, oy);
-    cairo_scale(cr, scale, scale);
+    cairo_scale(cr, sx, sy);
     cairo_set_source_surface(cr, surf, 0.0, 0.0);
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_paint(cr);
@@ -2296,7 +2418,7 @@ static void screen_render_now(App *app) {
     if (!app->output_buf || !app->output_view) return;
 
     ui_update_output_mode(app);
-    if (app->video_mode == WB_VIDEO_GFX1) {
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
         if (app->gfx_area) gtk_widget_queue_draw(app->gfx_area);
         return;
     }
@@ -6163,6 +6285,94 @@ static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool
     }
 }
 
+
+static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+        runtime_error(app, current_line, "CIRCLE requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "CIRCLE expects (x,y),r"); return false; }
+
+    double xv = 0.0, yv = 0.0, rv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "CIRCLE expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "CIRCLE expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "CIRCLE expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "CIRCLE missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
+
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "CIRCLE expects color"); return false; }
+        color = (int)llround(cv);
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int r = (int)llround(rv);
+    if (r < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    gfx_circle(app, x, y, r, color);
+    screen_render(app);
+    return true;
+}
+
+
+static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+        runtime_error(app, current_line, "PAINT requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PAINT expects (x,y),color"); return false; }
+
+    double xv = 0.0, yv = 0.0, cv = 0.0;
+    bool have_border = false;
+    int border = 0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PAINT expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PAINT expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PAINT missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+    if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+
+    /* Optional border color argument for boundary fill semantics. */
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double bv = 0.0;
+        if (!parse_expr(app, p, &bv)) { runtime_error(app, current_line, "PAINT expects border"); return false; }
+        border = (int)llround(bv);
+        have_border = true;
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    int color = (int)llround(cv);
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    if (!gfx_paint(app, x, y, color, have_border, border)) {
+        runtime_error(app, current_line, "Out of memory");
+        return false;
+    }
+
+    screen_render(app);
+    return true;
+}
+
 /* ---- File I/O helpers ---- */
 static void files_close_all(App *app);
 static BasicFile *file_get(App *app, int n);
@@ -7065,6 +7275,16 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         screen_render(app);
         return true;
     }
+    if (mode == 2) {
+        if (!gfx_alloc(app, 640, 200)) {
+            runtime_error(app, current_line, "Out of memory");
+            return false;
+        }
+        app->video_mode = WB_VIDEO_GFX2;
+        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        screen_render(app);
+        return true;
+    }
 
     runtime_error(app, current_line, "Unsupported SCREEN mode");
     return false;
@@ -7072,7 +7292,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
 
 static bool exec_pset(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (app->video_mode != WB_VIDEO_GFX1) {
+    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "PSET requires graphics mode");
         return false;
     }
@@ -7106,7 +7326,7 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
 
 static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (app->video_mode != WB_VIDEO_GFX1) {
+    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "LINE requires graphics mode");
         return false;
     }
@@ -7129,12 +7349,70 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
 
     int color = app->cur_fg;
+    int draw_mode = 0; /* 0=line, 1=box, 2=boxfill */
+
     skip_ws(p);
     if (consume(p, ',')) {
-        double cv = 0.0;
-        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "LINE expects color"); return false; }
-        color = (int)llround(cv);
+        bool color_set = false;
+        bool mode_set = false;
+
+        skip_ws(p);
+
+        /* Optional [attribute], including omitted attribute in forms like LINE ...,,B. */
+        if (!consume(p, ',')) {
+            const char *t = p->s;
+            if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                draw_mode = 2;
+                mode_set = true;
+                p->s += 2;
+            } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                draw_mode = 1;
+                mode_set = true;
+                p->s += 1;
+            } else {
+                double cv = 0.0;
+                if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "LINE expects color"); return false; }
+                color = (int)llround(cv);
+                color_set = true;
+            }
+        }
+
+        skip_ws(p);
+        if (consume(p, ',')) {
+            skip_ws(p);
+
+            if (!mode_set) {
+                const char *t = p->s;
+                if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                    draw_mode = 2;
+                    mode_set = true;
+                    p->s += 2;
+                } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                    draw_mode = 1;
+                    mode_set = true;
+                    p->s += 1;
+                } else {
+                    double stylev = 0.0;
+                    if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+                }
+            } else {
+                double stylev = 0.0;
+                if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+            }
+
+            skip_ws(p);
+            if (consume(p, ',')) {
+                double stylev = 0.0;
+                if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+            }
+        } else if (!color_set && mode_set) {
+            /* LINE ...,B (or BF) with no style */
+        }
     }
+
     skip_ws(p);
     if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
     if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
@@ -7143,7 +7421,27 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     int y1 = (int)llround(y1v);
     int x2 = (int)llround(x2v);
     int y2 = (int)llround(y2v);
-    gfx_line(app, x1, y1, x2, y2, color);
+
+    if (draw_mode == 0) {
+        gfx_line(app, x1, y1, x2, y2, color);
+    } else {
+        int xmin = (x1 < x2) ? x1 : x2;
+        int xmax = (x1 > x2) ? x1 : x2;
+        int ymin = (y1 < y2) ? y1 : y2;
+        int ymax = (y1 > y2) ? y1 : y2;
+
+        if (draw_mode == 1) {
+            gfx_line(app, xmin, ymin, xmax, ymin, color);
+            gfx_line(app, xmax, ymin, xmax, ymax, color);
+            gfx_line(app, xmax, ymax, xmin, ymax, color);
+            gfx_line(app, xmin, ymax, xmin, ymin, color);
+        } else {
+            for (int y = ymin; y <= ymax; y++) {
+                gfx_line(app, xmin, y, xmax, y, color);
+            }
+        }
+    }
+
     screen_render(app);
     return true;
 }
@@ -9953,7 +10251,7 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
-        if (app->video_mode == WB_VIDEO_GFX1) {
+        if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
             screen_render(app);
         } else {
@@ -9986,6 +10284,18 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
             free(tmp);
             return ok;
         }
+    }
+    if (starts_ci(s, "CIRCLE") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_circle_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PAINT") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_paint_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
     }
 
 // CLEAR [expr[,expr[,expr]]]  (GW-BASIC compatibility: clear variables/arrays, close files, reset stacks; ignore sizing args)
@@ -10835,6 +11145,18 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
             free(tmp);
             return ok;
         }
+    }
+    if (starts_ci(s, "CIRCLE") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_circle_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PAINT") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_paint_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
     }
 
     // LET (optional)
@@ -12240,7 +12562,7 @@ static void do_immediate(App *app, const char *cmdline) {
 
     if ((starts_ci(s, "CLS") && is_word_boundary(s[3])) ||
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
-        if (starts_ci(s, "CLS") && app->video_mode == WB_VIDEO_GFX1) {
+        if (starts_ci(s, "CLS") && (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2)) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
             screen_render(app);
         } else {

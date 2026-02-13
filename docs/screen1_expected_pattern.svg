@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="228" viewBox="0 0 320 228">
+<rect width="100%" height="100%" fill="#1f1f1f"/>
+<text x="8" y="18" font-family="monospace" font-size="14" fill="#e0e0e0">SCREEN 1 expected color pattern (320x200)</text>
+<rect x="0" y="28" width="80" height="50" fill="#000000"/>
+<text x="4" y="42" font-family="monospace" font-size="12" fill="#000">0</text>
+<rect x="80" y="28" width="80" height="50" fill="#0000AA"/>
+<text x="84" y="42" font-family="monospace" font-size="12" fill="#000">1</text>
+<rect x="160" y="28" width="80" height="50" fill="#00AA00"/>
+<text x="164" y="42" font-family="monospace" font-size="12" fill="#000">2</text>
+<rect x="240" y="28" width="80" height="50" fill="#00AAAA"/>
+<text x="244" y="42" font-family="monospace" font-size="12" fill="#000">3</text>
+<rect x="0" y="78" width="80" height="50" fill="#AA0000"/>
+<text x="4" y="92" font-family="monospace" font-size="12" fill="#000">4</text>
+<rect x="80" y="78" width="80" height="50" fill="#AA00AA"/>
+<text x="84" y="92" font-family="monospace" font-size="12" fill="#000">5</text>
+<rect x="160" y="78" width="80" height="50" fill="#AA5500"/>
+<text x="164" y="92" font-family="monospace" font-size="12" fill="#000">6</text>
+<rect x="240" y="78" width="80" height="50" fill="#AAAAAA"/>
+<text x="244" y="92" font-family="monospace" font-size="12" fill="#000">7</text>
+<rect x="0" y="128" width="80" height="50" fill="#555555"/>
+<text x="4" y="142" font-family="monospace" font-size="12" fill="#000">8</text>
+<rect x="80" y="128" width="80" height="50" fill="#5555FF"/>
+<text x="84" y="142" font-family="monospace" font-size="12" fill="#000">9</text>
+<rect x="160" y="128" width="80" height="50" fill="#55FF55"/>
+<text x="164" y="142" font-family="monospace" font-size="12" fill="#000">10</text>
+<rect x="240" y="128" width="80" height="50" fill="#55FFFF"/>
+<text x="244" y="142" font-family="monospace" font-size="12" fill="#000">11</text>
+<rect x="0" y="178" width="80" height="50" fill="#FF5555"/>
+<text x="4" y="192" font-family="monospace" font-size="12" fill="#000">12</text>
+<rect x="80" y="178" width="80" height="50" fill="#FF55FF"/>
+<text x="84" y="192" font-family="monospace" font-size="12" fill="#000">13</text>
+<rect x="160" y="178" width="80" height="50" fill="#FFFF55"/>
+<text x="164" y="192" font-family="monospace" font-size="12" fill="#000">14</text>
+<rect x="240" y="178" width="80" height="50" fill="#FFFFFF"/>
+<text x="244" y="192" font-family="monospace" font-size="12" fill="#000">15</text>
+<line x1="0" y1="28" x2="0" y2="228" stroke="#000" stroke-width="1"/>
+<line x1="80" y1="28" x2="80" y2="228" stroke="#000" stroke-width="1"/>
+<line x1="160" y1="28" x2="160" y2="228" stroke="#000" stroke-width="1"/>
+<line x1="240" y1="28" x2="240" y2="228" stroke="#000" stroke-width="1"/>
+<line x1="320" y1="28" x2="320" y2="228" stroke="#000" stroke-width="1"/>
+<line x1="0" y1="28" x2="320" y2="28" stroke="#000" stroke-width="1"/>
+<line x1="0" y1="78" x2="320" y2="78" stroke="#000" stroke-width="1"/>
+<line x1="0" y1="128" x2="320" y2="128" stroke="#000" stroke-width="1"/>
+<line x1="0" y1="178" x2="320" y2="178" stroke="#000" stroke-width="1"/>
+<line x1="0" y1="228" x2="320" y2="228" stroke="#000" stroke-width="1"/>
+</svg>
