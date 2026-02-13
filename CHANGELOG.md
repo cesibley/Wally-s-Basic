@@ -44,6 +44,8 @@
 
 - Implemented PRINT USING formatting with full semantics
 
+- Added "Renum" to "Program" Menu"
+
 ## [V1.12-V1.19] - Skipped
 
 ## [V1.11] – Extensive Testing, Compatibility GAP and Bug Squish
