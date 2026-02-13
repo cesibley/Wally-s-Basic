@@ -4,16 +4,15 @@
 
 This document evaluates what it would take to add **GW-BASIC-compatible `PRINT USING`** behavior to WBASIC, including numeric and string mask semantics, parser/runtime integration, and regression coverage.
 
-## Current WBASIC Behavior (Baseline)
+## Historical Baseline (Original Planning Snapshot)
 
-- `PRINT` currently supports:
-  - plain string/numeric print-list items,
-  - `,` (zone spacing), `;` (concatenation),
-  - `TAB(n)` and `SPC(n)`.
-- Numeric output currently uses generic formatting (`%.0f` for integral values, `%.12g` otherwise).
-- There is no `USING` branch in `exec_print`.
+The section below captures the **pre-implementation baseline** this plan was originally written against:
 
-Implication: `PRINT USING "..."; ...` is not implemented and will not provide GW-BASIC mask formatting.
+- `PRINT` supported plain string/numeric print-list items, `,` (zone spacing), `;` (concatenation), plus `TAB(n)` and `SPC(n)`.
+- Numeric output used generic formatting (`%.0f` for integral values, `%.12g` otherwise).
+- `PRINT USING` was not yet implemented in `exec_print`.
+
+> Note: this baseline is intentionally preserved for planning context. See **Phase 2 Review (Current WBASIC Snapshot)** for the up-to-date implementation status.
 
 ---
 
@@ -199,40 +198,6 @@ Recommended strategy:
 
 ---
 
-
-## Implementation Readiness (Prep for the Actual Update)
-
-To prepare for implementation, complete this short pre-flight checklist before coding:
-
-1. **Confirm current parser entry points**
-   - Locate `exec_print` and the token parser path that currently handles `PRINT` list items.
-   - Verify where `USING` can be recognized without regressing normal `PRINT` behavior.
-
-2. **Define the first shippable milestone (MVP)**
-   - MVP should include: `PRINT USING format$; exprlist` with numeric `#`/`.` masks, rounding, width, and overflow marker behavior.
-   - Explicitly defer sign/currency/fill/scientific/string-mask semantics to follow-up milestones.
-
-3. **Add formatter scaffolding before feature depth**
-   - Introduce a `compile_print_using_format(...)` path that returns tokenized literals + fields.
-   - Add an execution loop that supports format cycling when arguments exceed fields.
-
-4. **Lock down compatibility decisions up front**
-   - Decide and document exact overflow marker policy (`%` width fill vs dialect variant).
-   - Decide error text mapping strategy (exact GW-BASIC text vs WBASIC-consistent equivalents).
-
-5. **Create test harness slots first**
-   - Add placeholder test files for numeric core, separator interaction, and cycling behavior.
-   - Start with golden-output baselines so behavior changes are visible per phase.
-
-### Suggested Work Breakdown (Implementation-Ready)
-
-- **PR 1:** parser detection + format tokenizer skeleton + no-op/literal-safe execution path.
-- **PR 2:** numeric core (`#`, `.`, width, rounding, overflow) + focused tests.
-- **PR 3:** extended numeric symbols (`,`, `+`, `-`, `$`, `*`, `^^^^`) + interaction tests.
-- **PR 4:** string masks (`!`, `\...\`, `&`) + mixed literal formatting + parity cleanup.
-
-This preparation reduces implementation churn, keeps regressions isolated, and enables incremental parity tracking against GW-BASIC output expectations.
-
 ## Estimated Implementation Effort
 
 - **Phase 1 (MVP numeric only)**: 1–2 days
@@ -257,57 +222,3 @@ Implement in phases with explicit milestone labels:
 5. Parity hardening against known GW-BASIC outputs.
 
 This reduces risk and allows incremental shipping while preserving existing `PRINT` behavior.
-
----
-
-## Phase 2 Review (Current WBASIC Snapshot)
-
-This section reviews the current implementation against **Phase 2: full numeric semantics**.
-
-### What is already in place
-
-- `PRINT USING` is recognized in `exec_print` and routed into a dedicated handler.
-- Format string parsing/compilation exists and currently tokenizes:
-  - numeric fields made from `#` and optional `.`,
-  - literal text segments.
-- Numeric formatting currently supports:
-  - field width via `#` count,
-  - fixed decimal precision from `.` placement,
-  - rounding,
-  - `%` overflow fill,
-  - basic negative-sign insertion for plain masks.
-- Format cycling is present: when numeric arguments exceed numeric fields, scanning resumes from the beginning of the compiled token stream.
-
-### Phase 2 gaps (must be added for “full numeric semantics”)
-
-The following symbols/behaviors are **not yet implemented** in mask compilation/formatting and are required to satisfy Phase 2 scope:
-
-1. Thousands grouping insertion points via `,`.
-2. Explicit sign controls (`+` leading/trailing and trailing minus style semantics).
-3. Currency marker behavior (`$`, including position/interactions).
-4. Star fill behavior (`*`, including `**`-style leading fill semantics).
-5. Scientific notation masks (`^^^^`) and interaction rules with width/sign/fill.
-6. Dialect-accurate precedence rules when combinations appear in one mask.
-
-### Additional parity notes discovered during review
-
-- String mask tokens (`!`, `\   \`, `&`) are not yet parsed or formatted.
-- `PRINT USING` currently rejects string values (type mismatch path) because only numeric-field tokens are supported.
-- Separator behavior in `PRINT USING` currently preserves newline suppression on trailing `;`/`,`; however, zone movement semantics for commas inside/around USING flows should be re-verified against GW-BASIC examples once Phase 2 symbols are added.
-
-### Recommended Phase 2 execution order
-
-1. Extend tokenizer to recognize numeric mask metadata (`+`, `-`, `$`, `*`, `,`, `^^^^`) while preserving literal-token boundaries.
-2. Refactor numeric formatter into a descriptor-driven pipeline (parse mask → normalize magnitude/sign → apply rounding → render digits/grouping → apply sign/currency/fill).
-3. Add focused golden tests per symbol family, then combination tests for precedence/interaction.
-4. Freeze overflow and edge behavior with explicit expected outputs before starting Phase 3 string fields.
-
-### Suggested acceptance criteria for Phase 2 sign-off
-
-- All numeric symbols listed above are accepted by the parser and rendered with deterministic output.
-- Regression coverage includes at least:
-  - positive/negative/zero cases,
-  - boundary rounding values,
-  - overflow behavior,
-  - mixed-symbol masks.
-- No regressions in existing `PRINT`, `TAB`, `SPC`, and non-USING print-list behavior.

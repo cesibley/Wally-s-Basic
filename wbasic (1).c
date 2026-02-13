@@ -6172,15 +6172,12 @@ static void print_comma_zone(App *app) {
 
 typedef enum {
     PRINT_USING_TOKEN_LIT = 0,
-    PRINT_USING_TOKEN_NUM = 1,
-    PRINT_USING_TOKEN_STR = 2
+    PRINT_USING_TOKEN_NUM = 1
 } PrintUsingTokenKind;
 
 typedef struct {
     PrintUsingTokenKind kind;
     char *text;
-    char str_mode;
-    int str_width;
 } PrintUsingToken;
 
 static void print_using_tokens_free(PrintUsingToken *tokens, int count) {
@@ -6205,8 +6202,6 @@ static bool print_using_tokens_push(App *app, PrintUsingToken **tokens, int *cou
     dup[len] = 0;
     (*tokens)[*count].kind = kind;
     (*tokens)[*count].text = dup;
-    (*tokens)[*count].str_mode = 0;
-    (*tokens)[*count].str_width = 0;
     (*count)++;
     return true;
 }
@@ -6221,46 +6216,6 @@ static bool print_using_compile(App *app, const char *fmt, PrintUsingToken **out
     int count = 0, cap = 0;
     int i = 0;
     while (fmt[i]) {
-        if (fmt[i] == '!') {
-            if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_STR, fmt + i, 1)) {
-                print_using_tokens_free(tokens, count);
-                return false;
-            }
-            tokens[count - 1].str_mode = '!';
-            tokens[count - 1].str_width = 1;
-            i++;
-            continue;
-        }
-
-        if (fmt[i] == '&') {
-            if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_STR, fmt + i, 1)) {
-                print_using_tokens_free(tokens, count);
-                return false;
-            }
-            tokens[count - 1].str_mode = '&';
-            tokens[count - 1].str_width = 0;
-            i++;
-            continue;
-        }
-
-        if (fmt[i] == '\\') {
-            int j = i + 1;
-            while (fmt[j] && fmt[j] != '\\') j++;
-            if (fmt[j] != '\\') {
-                print_using_tokens_free(tokens, count);
-                err_set(app, "Bad format string");
-                return false;
-            }
-            if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_STR, fmt + i, j - i + 1)) {
-                print_using_tokens_free(tokens, count);
-                return false;
-            }
-            tokens[count - 1].str_mode = '\\';
-            tokens[count - 1].str_width = (j - i - 1);
-            i = j + 1;
-            continue;
-        }
-
         if (fmt[i] == '#' || fmt[i] == '.') {
             int j = i;
             int hashes = 0;
@@ -6282,7 +6237,7 @@ static bool print_using_compile(App *app, const char *fmt, PrintUsingToken **out
         }
 
         int j = i;
-        while (fmt[j] && fmt[j] != '#' && fmt[j] != '.' && fmt[j] != '!' && fmt[j] != '&' && fmt[j] != '\\') j++;
+        while (fmt[j] && fmt[j] != '#' && fmt[j] != '.') j++;
         if (!print_using_tokens_push(app, &tokens, &count, &cap, PRINT_USING_TOKEN_LIT, fmt + i, j - i)) {
             print_using_tokens_free(tokens, count);
             return false;
@@ -6293,37 +6248,6 @@ static bool print_using_compile(App *app, const char *fmt, PrintUsingToken **out
     *out_tokens = tokens;
     *out_count = count;
     return true;
-}
-
-static bool print_using_format_string(const PrintUsingToken *token, const char *sv, char **out) {
-    if (!token || !out) return false;
-    *out = NULL;
-    const char *s = sv ? sv : "";
-    if (token->str_mode == '&') {
-        *out = xstrdup(s);
-        return *out != NULL;
-    }
-    if (token->str_mode == '!') {
-        char *buf = (char*)malloc(2);
-        if (!buf) return false;
-        buf[0] = s[0] ? s[0] : ' ';
-        buf[1] = 0;
-        *out = buf;
-        return true;
-    }
-    if (token->str_mode == '\\') {
-        int width = (token->str_width >= 0) ? token->str_width : 0;
-        char *buf = (char*)malloc((size_t)width + 1);
-        if (!buf) return false;
-        for (int i = 0; i < width; i++) buf[i] = ' ';
-        int slen = (int)strlen(s);
-        int ncpy = (slen < width) ? slen : width;
-        if (ncpy > 0) memcpy(buf, s, (size_t)ncpy);
-        buf[width] = 0;
-        *out = buf;
-        return true;
-    }
-    return false;
 }
 
 static bool print_using_format_numeric(const char *mask, double v, char **out) {
@@ -6414,39 +6338,19 @@ static bool print_using_format_numeric(const char *mask, double v, char **out) {
     return true;
 }
 
-static bool print_using_emit_literals_until_field(App *app, const PrintUsingToken *tokens,
-                                                  int token_count, int *cursor,
-                                                  PrintUsingTokenKind *found_kind) {
-    if (!app || !tokens || token_count <= 0 || !cursor) return false;
-    if (found_kind) *found_kind = PRINT_USING_TOKEN_LIT;
-
-    int start = (*cursor % token_count + token_count) % token_count;
-    for (int n = 0; n < token_count; n++) {
-        int idx = (start + n) % token_count;
-        if (tokens[idx].kind != PRINT_USING_TOKEN_LIT) {
-            *cursor = idx;
-            if (found_kind) *found_kind = tokens[idx].kind;
-            return true;
-        }
-        out_append(app, tokens[idx].text ? tokens[idx].text : "");
-        *cursor = (idx + 1) % token_count;
-    }
-    return false;
-}
-
-
-static void print_using_emit_literals_to_pass_end(App *app, const PrintUsingToken *tokens,
-                                                  int token_count, int *cursor) {
+static void print_using_emit_literals_until_numeric(App *app, const PrintUsingToken *tokens,
+                                                int token_count, int *cursor) {
     if (!app || !tokens || token_count <= 0 || !cursor) return;
-    if (*cursor < 0 || *cursor >= token_count) return;
 
-    for (int idx = *cursor; idx < token_count; idx++) {
-        if (tokens[idx].kind != PRINT_USING_TOKEN_LIT) {
+    /* Emit literals only within the current linear pass (no wrap). */
+    int start = (*cursor % token_count + token_count) % token_count;
+    for (int idx = start; idx < token_count; idx++) {
+        if (tokens[idx].kind == PRINT_USING_TOKEN_NUM) {
             *cursor = idx;
             return;
         }
         out_append(app, tokens[idx].text ? tokens[idx].text : "");
-        *cursor = idx + 1;
+        *cursor = (idx + 1) % token_count;
     }
 }
 
@@ -6477,9 +6381,9 @@ static bool exec_print_using(App *app, Parser *p, int current_line) {
     }
     free(fmt);
 
-    int field_count = 0;
-    for (int i = 0; i < token_count; i++) if (tokens[i].kind != PRINT_USING_TOKEN_LIT) field_count++;
-    if (field_count <= 0) {
+    int numeric_count = 0;
+    for (int i = 0; i < token_count; i++) if (tokens[i].kind == PRINT_USING_TOKEN_NUM) numeric_count++;
+    if (numeric_count <= 0) {
         print_using_tokens_free(tokens, token_count);
         runtime_error(app, current_line, "Bad format string");
         return false;
@@ -6492,59 +6396,52 @@ static bool exec_print_using(App *app, Parser *p, int current_line) {
         if (*p->s == 0) break;
 
         const char *save = p->s;
-        bool is_string_expr = false;
         char *sv = NULL;
-        double nv = 0.0;
         if (parse_string_value(app, p, &sv)) {
-            is_string_expr = true;
-        } else {
-            p->s = save;
-            if (!parse_expr(app, p, &nv)) {
-                print_using_tokens_free(tokens, token_count);
-                return false;
-            }
-        }
-
-        PrintUsingTokenKind got_kind = PRINT_USING_TOKEN_LIT;
-        if (!print_using_emit_literals_until_field(app, tokens, token_count, &next_field, &got_kind)) {
-            print_using_tokens_free(tokens, token_count);
-            runtime_error(app, current_line, "Bad format string");
             free(sv);
-            return false;
-        }
-
-        int idx = next_field;
-        if ((is_string_expr && got_kind != PRINT_USING_TOKEN_STR) || (!is_string_expr && got_kind != PRINT_USING_TOKEN_NUM)) {
             print_using_tokens_free(tokens, token_count);
             runtime_error(app, current_line, "Type mismatch");
-            free(sv);
+            return false;
+        }
+        p->s = save;
+
+        double nv = 0.0;
+        if (!parse_expr(app, p, &nv)) {
+            print_using_tokens_free(tokens, token_count);
             return false;
         }
 
-        char *formatted = NULL;
-        bool ok = false;
-        if (is_string_expr) ok = print_using_format_string(&tokens[idx], sv, &formatted);
-        else ok = print_using_format_numeric(tokens[idx].text, nv, &formatted);
-        if (!ok) {
+        int seen_numeric = 0;
+        print_using_emit_literals_until_numeric(app, tokens, token_count, &next_field);
+        for (int i = 0; i < token_count; i++) {
+            int idx = (next_field + i) % token_count;
+            if (tokens[idx].kind == PRINT_USING_TOKEN_LIT) continue;
+            char *formatted = NULL;
+            if (!print_using_format_numeric(tokens[idx].text, nv, &formatted)) {
+                print_using_tokens_free(tokens, token_count);
+                runtime_error(app, current_line, "Bad format string");
+                return false;
+            }
+            out_append(app, formatted ? formatted : "");
+            free(formatted);
+            next_field = (idx + 1) % token_count;
+            print_using_emit_literals_until_numeric(app, tokens, token_count, &next_field);
+            seen_numeric = 1;
+            break;
+        }
+
+        if (!seen_numeric) {
             print_using_tokens_free(tokens, token_count);
             runtime_error(app, current_line, "Bad format string");
-            free(sv);
             return false;
         }
-        out_append(app, formatted ? formatted : "");
-        free(formatted);
-        free(sv);
-        next_field = idx + 1;
-        if (next_field >= token_count) next_field = 0;
 
         skip_ws(p);
         if (*p->s == ',') { p->s++; last_sep = ','; continue; }
         if (*p->s == ';') { p->s++; last_sep = ';'; continue; }
-        last_sep = 0;
         break;
     }
 
-    if (next_field > 0) print_using_emit_literals_to_pass_end(app, tokens, token_count, &next_field);
     print_using_tokens_free(tokens, token_count);
     if (last_sep == 0) out_append(app, "\n");
     return true;
