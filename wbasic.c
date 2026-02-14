@@ -4379,6 +4379,8 @@ if (!strcasecmp(name, "ERL")) {
                     if (!parse_expr(app, p, &yv)) { free(name); return false; }
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
+                    if (!wbasic_ui_active(app)) { err_set(app, "Graphics not available in CLI/headless mode"); free(name); return false; }
+                    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) { err_set(app, "POINT requires graphics mode"); free(name); return false; }
                     int xi = (int)llround(xv);
                     int yi = (int)llround(yv);
                     int c = gfx_point(app, xi, yi);
@@ -6388,6 +6390,10 @@ static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool
 
 static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
     if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "CIRCLE requires graphics mode");
         return false;
@@ -6429,6 +6435,10 @@ static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
 
 static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
     if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "PAINT requires graphics mode");
         return false;
@@ -7332,7 +7342,12 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     }
 
     if (have_fg) {
-        if (new_fg < 0 || new_fg > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+        /*
+           GW-BASIC accepts foreground values 0..31 for COLOR attributes
+           (high bit range carries intensity/blink semantics).
+           WBASIC stores the full attribute value for compatibility.
+        */
+        if (new_fg < 0 || new_fg > 31) { runtime_error(app, current_line, "Bad color"); return false; }
         app->cur_fg = new_fg;
     }
     if (have_bg) {
@@ -7354,7 +7369,37 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         return false;
     }
     int mode = (int)llround(mode_v);
+
+    /*
+       GW-BASIC accepts optional SCREEN arguments:
+         SCREEN mode[,colorburst][,apage][,vpage]
+       For compatibility we parse (and currently ignore) up to three optional
+       numeric expressions after mode.
+    */
     skip_ws(p);
+    int opt_count = 0;
+    while (*p->s == ',') {
+        p->s++;
+        opt_count++;
+        if (opt_count > 3) {
+            runtime_error(app, current_line, "Syntax error");
+            return false;
+        }
+
+        skip_ws(p);
+        if (*p->s == ',' || *p->s == '\0') {
+            /* Empty optional argument is allowed (e.g., SCREEN 0,,0) */
+            continue;
+        }
+
+        double ignored = 0.0;
+        if (!parse_expr(app, p, &ignored)) {
+            runtime_error(app, current_line, "Syntax error");
+            return false;
+        }
+        skip_ws(p);
+    }
+
     if (*p->s != '\0') {
         runtime_error(app, current_line, "Syntax error");
         return false;
@@ -7367,6 +7412,10 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         return true;
     }
     if (mode == 1) {
+        if (!wbasic_ui_active(app)) {
+            runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+            return false;
+        }
         if (!gfx_alloc(app, 320, 200)) {
             runtime_error(app, current_line, "Out of memory");
             return false;
@@ -7378,6 +7427,10 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         return true;
     }
     if (mode == 2) {
+        if (!wbasic_ui_active(app)) {
+            runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+            return false;
+        }
         if (!gfx_alloc(app, 640, 200)) {
             runtime_error(app, current_line, "Out of memory");
             return false;
@@ -7395,6 +7448,10 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
 
 static bool exec_pset(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
     if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "PSET requires graphics mode");
         return false;
@@ -7429,6 +7486,10 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
 
 static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
     if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
         runtime_error(app, current_line, "LINE requires graphics mode");
         return false;
@@ -7461,8 +7522,12 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
 
         skip_ws(p);
 
+        bool color_omitted = false;
+
         /* Optional [attribute], including omitted attribute in forms like LINE ...,,B. */
-        if (!consume(p, ',')) {
+        if (consume(p, ',')) {
+            color_omitted = true;
+        } else {
             const char *t = p->s;
             if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
                 draw_mode = 2;
@@ -7477,6 +7542,21 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
                 if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "LINE expects color"); return false; }
                 color = (int)llround(cv);
                 color_set = true;
+            }
+        }
+
+        /* Omitted color form: LINE ...,,B / LINE ...,,BF */
+        if (color_omitted && !mode_set) {
+            skip_ws(p);
+            const char *t = p->s;
+            if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                draw_mode = 2;
+                mode_set = true;
+                p->s += 2;
+            } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                draw_mode = 1;
+                mode_set = true;
+                p->s += 1;
             }
         }
 

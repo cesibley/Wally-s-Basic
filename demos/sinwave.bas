@@ -2,8 +2,8 @@
 20 CLS
 30 PI = 3.14159
 35 st = 1
-40 AMPLITUDE = 50 ' Adjust wave height
-50 FREQUENCY = 0.1 ' Adjust wave length
+40 AMPLITUDE = 75 ' Adjust wave height
+50 FREQUENCY = 0.05 ' Adjust wave length
 60 YOFFSET = 100 ' Adjust vertical position (center of screen)
 70 XSTART = 0 ' Initial horizontal start point
 80
