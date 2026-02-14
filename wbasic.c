@@ -2347,6 +2347,104 @@ static void ui_update_output_mode(App *app) {
     }
 }
 
+static void ui_color_idx_to_rgb(const App *app, int idx, double *r, double *g, double *b, bool for_bg) {
+    if (!r || !g || !b) return;
+    if (idx == 16) {
+        if (for_bg && app && app->have_bg) {
+            *r = app->bg_color.red;
+            *g = app->bg_color.green;
+            *b = app->bg_color.blue;
+            return;
+        }
+        if (!for_bg && app && app->have_fg) {
+            *r = app->fg_color.red;
+            *g = app->fg_color.green;
+            *b = app->fg_color.blue;
+            return;
+        }
+        idx = for_bg ? 0 : 7;
+    }
+    idx &= 0x0F;
+    *r = (double)vga16_rgb[idx][0] / 255.0;
+    *g = (double)vga16_rgb[idx][1] / 255.0;
+    *b = (double)vga16_rgb[idx][2] / 255.0;
+}
+
+static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
+                                     double ox, double oy,
+                                     double draw_w, double draw_h) {
+    if (!app || !app->screen || app->screen_rows <= 0 || app->screen_cols <= 0) return;
+
+    int R = app->screen_rows;
+    int C = app->screen_cols;
+    double cell_w = draw_w / (double)C;
+    double cell_h = draw_h / (double)R;
+    if (cell_w <= 0.0 || cell_h <= 0.0) return;
+
+    cairo_save(cr);
+    cairo_translate(cr, ox, oy);
+    cairo_select_font_face(cr, "Monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+
+    /* Keep glyphs within cell bounds: SCREEN 1/2 often have much taller rows than columns,
+       so purely height-based sizing causes horizontal overlap (e.g., "COLOR" -> "CCLOR"). */
+    double fs_h = cell_h * 0.82;
+    double fs_w = cell_w * 1.45;
+    double font_sz = fs_h;
+    if (fs_w < font_sz) font_sz = fs_w;
+    if (font_sz < 6.0) font_sz = 6.0;
+    cairo_set_font_size(cr, font_sz);
+
+    cairo_font_extents_t fe;
+    cairo_font_extents(cr, &fe);
+    double y_base_off = (cell_h - fe.height) * 0.5 + fe.ascent;
+
+    /* Pass 1: draw text-cell backgrounds first so later cells never erase earlier glyphs. */
+    for (int r = 0; r < R; r++) {
+        for (int c = 0; c < C; c++) {
+            size_t idx = (size_t)r * (size_t)C + (size_t)c;
+            char ch = app->screen[idx];
+            int bg = app->screen_bg ? app->screen_bg[idx] : app->cur_bg;
+            if (bg < 0) bg = 0;
+            if (bg == 16 || ch == ' ') continue;
+
+            double x = (double)c * cell_w;
+            double y = (double)r * cell_h;
+            double br, bgc, bb;
+            ui_color_idx_to_rgb(app, bg, &br, &bgc, &bb, true);
+            cairo_set_source_rgb(cr, br, bgc, bb);
+            cairo_rectangle(cr, floor(x), floor(y), ceil(cell_w), ceil(cell_h));
+            cairo_fill(cr);
+        }
+    }
+
+    /* Pass 2: draw glyphs on top. */
+    for (int r = 0; r < R; r++) {
+        for (int c = 0; c < C; c++) {
+            size_t idx = (size_t)r * (size_t)C + (size_t)c;
+            char ch = app->screen[idx];
+            int fg = app->screen_fg ? app->screen_fg[idx] : app->cur_fg;
+            if (fg < 0) fg = 7;
+            if (ch == ' ') continue;
+
+            double x = (double)c * cell_w;
+            double y = (double)r * cell_h;
+            double fr, fgc, fb;
+            ui_color_idx_to_rgb(app, fg, &fr, &fgc, &fb, false);
+            cairo_set_source_rgb(cr, fr, fgc, fb);
+
+            char txt[2] = { ch, 0 };
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, txt, &te);
+            double tx = x + (cell_w - te.x_advance) * 0.5;
+            if (tx < x) tx = x;
+            cairo_move_to(cr, tx, y + y_base_off);
+            cairo_show_text(cr, txt);
+        }
+    }
+
+    cairo_restore(cr);
+}
+
 static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     (void)widget;
     App *app = (App*)user_data;
@@ -2407,6 +2505,8 @@ static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_d
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_paint(cr);
     cairo_restore(cr);
+
+    ui_draw_gfx_text_overlay(app, cr, ox, oy, draw_w, draw_h);
 
     cairo_surface_destroy(surf);
     g_free(pix);
@@ -7262,6 +7362,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
 
     if (mode == 0) {
         app->video_mode = WB_VIDEO_TEXT;
+        screen_clear(app);
         screen_render(app);
         return true;
     }
@@ -7272,6 +7373,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         }
         app->video_mode = WB_VIDEO_GFX1;
         gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        screen_clear(app);
         screen_render(app);
         return true;
     }
@@ -7282,6 +7384,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         }
         app->video_mode = WB_VIDEO_GFX2;
         gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        screen_clear(app);
         screen_render(app);
         return true;
     }
@@ -10253,6 +10356,7 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
         if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            screen_clear(app);
             screen_render(app);
         } else {
             out_clear(app, true);
@@ -12564,6 +12668,7 @@ static void do_immediate(App *app, const char *cmdline) {
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
         if (starts_ci(s, "CLS") && (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2)) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            screen_clear(app);
             screen_render(app);
         } else {
             out_clear(app, true);
