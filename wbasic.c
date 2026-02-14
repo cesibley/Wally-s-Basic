@@ -11976,7 +11976,16 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
 
 static void key_macro_queue_clear(App *app);
 
+static void run_apply_default_screen0(App *app) {
+    if (!app) return;
+    app->video_mode = WB_VIDEO_TEXT;
+    screen_clear(app);
+    screen_render(app);
+}
+
 static void do_run(App *app) {
+
+    run_apply_default_screen0(app);
 
         // Ensure each RUN starts with Preferences exact colors (until BASIC COLOR is used).
         app->cur_fg = 16;
@@ -12046,6 +12055,7 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
     }
 
     /* Reset colors to preference defaults until BASIC COLOR is used */
+    run_apply_default_screen0(app);
     app->cur_fg = 16;
     app->cur_bg = 16;
         if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
