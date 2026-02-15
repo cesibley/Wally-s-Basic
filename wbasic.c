@@ -1053,6 +1053,10 @@ WbVideoMode video_mode;
 int gfx_width;
 int gfx_height;
 unsigned char *gfx_pixels; /* size = gfx_width * gfx_height, color index 0..15 */
+int gfx_draw_x;
+int gfx_draw_y;
+int gfx_draw_scale; /* DRAW scale multiplier (GW-BASIC compatible baseline) */
+int gfx_draw_angle; /* DRAW angle quadrant 0..3 */
 
 /* Text mode COLOR state (0-15) */
 int cur_fg;   /* foreground */
@@ -6436,6 +6440,159 @@ static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool
 }
 
 
+static void gfx_draw_move(App *app, int *x, int *y, int nx, int ny, int color, bool draw_line) {
+    if (draw_line) gfx_line(app, *x, *y, nx, ny, color);
+    *x = nx;
+    *y = ny;
+}
+
+static void gfx_draw_rotate_quadrant(int angle, int vx, int vy, int *rx, int *ry) {
+    int a = angle & 3;
+    if (a == 0) { *rx = vx;  *ry = vy; return; }
+    if (a == 1) { *rx = vy;  *ry = -vx; return; }
+    if (a == 2) { *rx = -vx; *ry = -vy; return; }
+    *rx = -vy; *ry = vx;
+}
+
+static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "DRAW requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    char *script = NULL;
+    if (!parse_string_value(app, p, &script)) {
+        runtime_error(app, current_line, "DRAW expects string");
+        return false;
+    }
+    skip_ws(p);
+    if (*p->s != '\0') {
+        free(script);
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+
+    int x = app->gfx_draw_x;
+    int y = app->gfx_draw_y;
+    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 4;
+    int angle = app->gfx_draw_angle & 3;
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+
+    const char *q = script;
+    while (*q) {
+        while (*q && (isspace((unsigned char)*q) || *q == ';' || *q == ',')) q++;
+        if (!*q) break;
+
+        bool blank = false;
+        bool no_update = false;
+        while (*q == 'B' || *q == 'b' || *q == 'N' || *q == 'n') {
+            if (*q == 'B' || *q == 'b') blank = true;
+            if (*q == 'N' || *q == 'n') no_update = true;
+            q++;
+        }
+
+        char cmd = (char)toupper((unsigned char)*q);
+        if (!cmd) break;
+        q++;
+
+        int n = 0;
+        bool have_n = false;
+        if (cmd != 'M') {
+            while (*q && isdigit((unsigned char)*q)) {
+                have_n = true;
+                n = n * 10 + (*q - '0');
+                q++;
+            }
+        }
+
+        int oldx = x, oldy = y;
+        int dx = 0, dy = 0;
+
+        switch (cmd) {
+            case 'U': dx = 0; dy = -1; break;
+            case 'D': dx = 0; dy = 1; break;
+            case 'L': dx = -1; dy = 0; break;
+            case 'R': dx = 1; dy = 0; break;
+            case 'E': dx = 1; dy = -1; break;
+            case 'F': dx = 1; dy = 1; break;
+            case 'G': dx = -1; dy = 1; break;
+            case 'H': dx = -1; dy = -1; break;
+            case 'A': {
+                if (!have_n || n < 0 || n > 3) { free(script); runtime_error(app, current_line, "DRAW bad angle"); return false; }
+                angle = n & 3;
+                continue;
+            }
+            case 'C': {
+                if (!have_n || n < 0 || n > 15) { free(script); runtime_error(app, current_line, "Bad color"); return false; }
+                color = n;
+                continue;
+            }
+            case 'S': {
+                if (!have_n || n < 1 || n > 255) { free(script); runtime_error(app, current_line, "Illegal function call"); return false; }
+                scale = n;
+                continue;
+            }
+            case 'M': {
+                while (*q && isspace((unsigned char)*q)) q++;
+                bool rel = false;
+                if (*q == '+' || *q == '-') {
+                    rel = true;
+                }
+                char *end = NULL;
+                long xv = strtol(q, &end, 10);
+                if (end == q) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = end;
+                while (*q && isspace((unsigned char)*q)) q++;
+                if (*q != ',') { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q++;
+                while (*q && isspace((unsigned char)*q)) q++;
+                long yv = strtol(q, &end, 10);
+                if (end == q) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = end;
+
+                int nx, ny;
+                if (rel) {
+                    int rx = 0, ry = 0;
+                    gfx_draw_rotate_quadrant(angle, (int)xv * scale, (int)yv * scale, &rx, &ry);
+                    nx = x + rx;
+                    ny = y + ry;
+                } else {
+                    nx = (int)xv;
+                    ny = (int)yv;
+                }
+                gfx_draw_move(app, &x, &y, nx, ny, color, !blank);
+                if (no_update) { x = oldx; y = oldy; }
+                continue;
+            }
+            default:
+                free(script);
+                runtime_error(app, current_line, "Syntax error");
+                return false;
+        }
+
+        int count = have_n ? n : 1;
+        int rx = 0, ry = 0;
+        gfx_draw_rotate_quadrant(angle, dx * scale * count, dy * scale * count, &rx, &ry);
+        gfx_draw_move(app, &x, &y, x + rx, y + ry, color, !blank);
+        if (no_update) { x = oldx; y = oldy; }
+    }
+
+    free(script);
+    app->gfx_draw_x = x;
+    app->gfx_draw_y = y;
+    app->gfx_draw_scale = scale;
+    app->gfx_draw_angle = angle;
+    screen_render(app);
+    return true;
+}
+
+
 static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
     if (!wbasic_ui_active(app)) {
@@ -6527,6 +6684,8 @@ static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
         return false;
     }
 
+    app->gfx_draw_x = x;
+    app->gfx_draw_y = y;
     screen_render(app);
     return true;
 }
@@ -7472,6 +7631,10 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
     app->video_mode = (WbVideoMode)spec->mode;
     if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
         gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        app->gfx_draw_x = 0;
+        app->gfx_draw_y = 0;
+        app->gfx_draw_scale = 4;
+        app->gfx_draw_angle = 0;
     }
     screen_clear(app);
     screen_render(app);
@@ -7498,7 +7661,7 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
     if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PSET expects y"); return false; }
     if (!consume(p, ')')) { runtime_error(app, current_line, "PSET missing ')'"); return false; }
 
-    int color = app->cur_fg;
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
     skip_ws(p);
     if (consume(p, ',')) {
         double cv = 0.0;
@@ -7512,7 +7675,11 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
     int x = (int)llround(xv);
     int y = (int)llround(yv);
     bool ok = gfx_pset(app, x, y, color);
-    if (ok) screen_render(app);
+    if (ok) {
+        app->gfx_draw_x = x;
+        app->gfx_draw_y = y;
+        screen_render(app);
+    }
     return ok;
 }
 
@@ -7544,7 +7711,7 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "LINE expects y2"); return false; }
     if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
 
-    int color = app->cur_fg;
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
     int draw_mode = 0; /* 0=line, 1=box, 2=boxfill */
 
     skip_ws(p);
@@ -7657,6 +7824,8 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
         }
     }
 
+    app->gfx_draw_x = x2;
+    app->gfx_draw_y = y2;
     screen_render(app);
     return true;
 }
@@ -10513,6 +10682,12 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
         free(tmp);
         return ok;
     }
+    if (starts_ci(s, "DRAW") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_draw_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
 // CLEAR [expr[,expr[,expr]]]  (GW-BASIC compatibility: clear variables/arrays, close files, reset stacks; ignore sizing args)
 if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
@@ -11371,6 +11546,12 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
     if (starts_ci(s, "PAINT") && is_word_boundary(s[5])) {
         Parser p = { s + 5 };
         bool ok = exec_paint_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "DRAW") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_draw_gfx(app, &p, current_line);
         free(tmp);
         return ok;
     }
