@@ -1055,7 +1055,7 @@ int gfx_height;
 unsigned char *gfx_pixels; /* size = gfx_width * gfx_height, color index 0..15 */
 int gfx_draw_x;
 int gfx_draw_y;
-int gfx_draw_scale; /* DRAW scale multiplier (GW-BASIC compatible baseline) */
+int gfx_draw_scale; /* DRAW scale multiplier (GW-BASIC compatibility) */
 int gfx_draw_angle; /* DRAW angle quadrant 0..3 */
 
 /* Text mode COLOR state (0-15) */
@@ -1894,6 +1894,14 @@ static void gfx_clear(App *app, unsigned char color_idx) {
     if (!app || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) return;
     size_t n = (size_t)app->gfx_width * (size_t)app->gfx_height;
     memset(app->gfx_pixels, (int)(color_idx & 0x0F), n);
+}
+
+static void gfx_draw_reset_defaults(App *app) {
+    if (!app) return;
+    app->gfx_draw_x = (app->gfx_width > 0) ? (app->gfx_width / 2) : 0;
+    app->gfx_draw_y = (app->gfx_height > 0) ? (app->gfx_height / 2) : 0;
+    app->gfx_draw_scale = 1;
+    app->gfx_draw_angle = 0;
 }
 
 static bool gfx_pset(App *app, int x, int y, int color_idx) {
@@ -6480,7 +6488,7 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
 
     int x = app->gfx_draw_x;
     int y = app->gfx_draw_y;
-    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 4;
+    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 1;
     int angle = app->gfx_draw_angle & 3;
     int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
 
@@ -6508,6 +6516,14 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
                 have_n = true;
                 n = n * 10 + (*q - '0');
                 q++;
+            }
+            if (!have_n && *q == '=') {
+                Parser np = { .s = q + 1 };
+                double nv = 0.0;
+                if (!parse_expr(app, &np, &nv)) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = np.s;
+                n = (int)nv;
+                have_n = true;
             }
         }
 
@@ -6588,6 +6604,7 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
     app->gfx_draw_y = y;
     app->gfx_draw_scale = scale;
     app->gfx_draw_angle = angle;
+    app->cur_fg = color;
     screen_render(app);
     return true;
 }
@@ -7631,10 +7648,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
     app->video_mode = (WbVideoMode)spec->mode;
     if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
         gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
-        app->gfx_draw_x = 0;
-        app->gfx_draw_y = 0;
-        app->gfx_draw_scale = 4;
-        app->gfx_draw_angle = 0;
+        gfx_draw_reset_defaults(app);
     }
     screen_clear(app);
     screen_render(app);
@@ -10637,6 +10651,7 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
         if (video_mode_is_graphics(app->video_mode)) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            gfx_draw_reset_defaults(app);
             screen_clear(app);
             screen_render(app);
         } else {
@@ -12971,6 +12986,7 @@ static void do_immediate(App *app, const char *cmdline) {
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
         if (starts_ci(s, "CLS") && (video_mode_is_graphics(app->video_mode))) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            gfx_draw_reset_defaults(app);
             screen_clear(app);
             screen_render(app);
         } else {
