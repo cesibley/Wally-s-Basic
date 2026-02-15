@@ -1,51 +1,49 @@
-10 REM ============================================
-20 REM WBASIC GRAPHICS COLOR PATTERN (SCREEN 1/2)
-30 REM Draw filled rectangles for all palette colors
-40 REM with overlay text labels per color block
-50 REM ============================================
+10 REM ==================================================
+20 REM WBASIC GRAPHICS COLOR PATTERN (ALL SCREEN MODES)
+30 REM Cycles SCREEN 1,2,3,7,8,9,10,11,12,13
+40 REM Shows mode + nominal resolution and color blocks
+50 REM ==================================================
 60
-70 REM ---- SCREEN 1: 320x200 ----
-80 SCREEN 1
-90 CLS
-100 BW = 80: BH = 50
-110 FOR C = 0 TO 15
-120   X = (C MOD 4) * BW
-130   Y = (C \ 4) * BH
-140   LINE (X,Y)-(X+BW-1,Y+BH-1), C, BF
-150   IF C < 8 THEN FC = 15 ELSE FC = 0
-160   COLOR FC, C
-170   R = (C \ 4) * 6 + 3
-180   K = (C MOD 4) * 20 + 3
-190   LOCATE R, K
-200   PRINT "COLOR"; C
-210 NEXT C
-220 COLOR 15,0
-230 LOCATE 1,1
-240 PRINT "SCREEN 1"
-250
-260 REM Keep visible until keypress
-270 K$ = INKEY$: IF K$ = "" THEN 270
-280
-290 REM ---- SCREEN 2: 640x200 ----
-300 SCREEN 2
-310 CLS
-320 BW = 160: BH = 50
-330 FOR C = 0 TO 15
-340   X = (C MOD 4) * BW
-350   Y = (C \ 4) * BH
-360   LINE (X,Y)-(X+BW-1,Y+BH-1), C, BF
-370   IF C < 8 THEN FC = 15 ELSE FC = 0
-380   COLOR FC, C
-390   R = (C \ 4) * 6 + 3
-400   K = (C MOD 4) * 20 + 3
-410   LOCATE R, K
-420   PRINT "COLOR"; C
-430 NEXT C
-440 COLOR 15,0
-450 LOCATE 1,1
-460 PRINT "SCREEN 2"
-470
-480 REM Keep visible until keypress
-490 K$ = INKEY$: IF K$ = "" THEN 490
-500 SCREEN 0
-510 END
+70 FOR I = 1 TO 10
+80   READ M, W, H
+90   SCREEN M
+100  CLS
+110
+120  BW = W \ 4
+130  BH = H \ 4
+140
+150  FOR C = 0 TO 15
+160    X = (C MOD 4) * BW
+170    Y = (C \ 4) * BH
+180    LINE (X,Y)-(X+BW-1,Y+BH-1), C, BF
+190
+200    IF C < 8 THEN FC = 15 ELSE FC = 0
+210    COLOR FC, C
+220    R = (C \ 4) * 6 + 3
+230    K = (C MOD 4) * 20 + 3
+240    LOCATE R, K
+250    PRINT "COLOR"; C
+260  NEXT C
+270
+280  COLOR 15,0
+290  LOCATE 24,1
+300  PRINT "SCREEN"; M; "  RES:"; W; "x"; H
+310  LOCATE 25,1
+320  PRINT "PRESS ANY KEY FOR NEXT MODE"
+330
+340  K$ = INKEY$: IF K$ = "" THEN 340
+350 NEXT I
+360
+370 SCREEN 0
+380 END
+390
+400 DATA 1,320,200
+410 DATA 2,640,200
+420 DATA 3,640,400
+430 DATA 7,320,200
+440 DATA 8,640,200
+450 DATA 9,640,350
+460 DATA 10,640,350
+470 DATA 11,640,480
+480 DATA 12,640,480
+490 DATA 13,320,200

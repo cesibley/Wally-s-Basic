@@ -853,8 +853,56 @@ typedef struct {
 typedef enum {
     WB_VIDEO_TEXT = 0,
     WB_VIDEO_GFX1 = 1,
-    WB_VIDEO_GFX2 = 2
+    WB_VIDEO_GFX2 = 2,
+    WB_VIDEO_GFX3 = 3,
+    WB_VIDEO_GFX7 = 7,
+    WB_VIDEO_GFX8 = 8,
+    WB_VIDEO_GFX9 = 9,
+    WB_VIDEO_GFX10 = 10,
+    WB_VIDEO_GFX11 = 11,
+    WB_VIDEO_GFX12 = 12,
+    WB_VIDEO_GFX13 = 13
 } WbVideoMode;
+
+typedef struct {
+    int mode;
+    int w;
+    int h;
+    int nominal_colors;
+    unsigned int policy_flags;
+} ScreenModeSpec;
+
+enum {
+    SCREEN_POLICY_REQUIRES_UI = 1u << 0,
+    SCREEN_POLICY_ALLOC_GFX   = 1u << 1
+};
+
+static const ScreenModeSpec k_screen_mode_specs[] = {
+    { .mode = 0,  .w = 0,   .h = 0,   .nominal_colors = 16, .policy_flags = 0 },
+    { .mode = 1,  .w = 320, .h = 200, .nominal_colors = 4,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 2,  .w = 640, .h = 200, .nominal_colors = 2,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 3,  .w = 640, .h = 400, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 7,  .w = 320, .h = 200, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 8,  .w = 640, .h = 200, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 9,  .w = 640, .h = 350, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 10, .w = 640, .h = 350, .nominal_colors = 4,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 11, .w = 640, .h = 480, .nominal_colors = 2,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 12, .w = 640, .h = 480, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 13, .w = 320, .h = 200, .nominal_colors = 256,.policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX }
+};
+
+static bool video_mode_is_graphics(WbVideoMode mode) {
+    return mode != WB_VIDEO_TEXT;
+}
+
+static const ScreenModeSpec *screen_mode_spec_find(int mode) {
+    for (size_t i = 0; i < (sizeof(k_screen_mode_specs) / sizeof(k_screen_mode_specs[0])); i++) {
+        if (k_screen_mode_specs[i].mode == mode) {
+            return &k_screen_mode_specs[i];
+        }
+    }
+    return NULL;
+}
 
 typedef struct App {
     bool resume_from_gosub;
@@ -1809,7 +1857,8 @@ static void screen_clear(App *app) {
     size_t n = (size_t)app->screen_rows * (size_t)app->screen_cols;
     memset(app->screen, ' ', n);
     if (app->screen_fg) memset(app->screen_fg, (unsigned char)app->cur_fg, n);
-    if (app->screen_bg) memset(app->screen_bg, (unsigned char)app->cur_bg, n);
+    int clear_bg = video_mode_is_graphics(app->video_mode) ? 16 : app->cur_bg;
+    if (app->screen_bg) memset(app->screen_bg, (unsigned char)clear_bg, n);
     app->out_row = 1;
     app->out_col = 1;
 }
@@ -2340,7 +2389,7 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 static void ui_update_output_mode(App *app) {
     if (!app || !app->output_stack) return;
-    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
+    if (video_mode_is_graphics(app->video_mode)) {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "gfx");
     } else {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "text");
@@ -2402,10 +2451,9 @@ static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
     for (int r = 0; r < R; r++) {
         for (int c = 0; c < C; c++) {
             size_t idx = (size_t)r * (size_t)C + (size_t)c;
-            char ch = app->screen[idx];
             int bg = app->screen_bg ? app->screen_bg[idx] : app->cur_bg;
             if (bg < 0) bg = 0;
-            if (bg == 16 || ch == ' ') continue;
+            if (bg == 16) continue;
 
             double x = (double)c * cell_w;
             double y = (double)r * cell_h;
@@ -2477,7 +2525,7 @@ static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_d
                                                                 CAIRO_FORMAT_ARGB32,
                                                                 w, h, w * 4);
 
-    /* SCREEN 1/2 use non-square pixels historically; present both in a 4:3 viewport. */
+    /* Graphics modes are presented in a fixed 4:3 viewport for consistent display. */
     double target_aspect = 4.0 / 3.0;
 
     double draw_w = (double)ww;
@@ -2518,7 +2566,7 @@ static void screen_render_now(App *app) {
     if (!app->output_buf || !app->output_view) return;
 
     ui_update_output_mode(app);
-    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
+    if (video_mode_is_graphics(app->video_mode)) {
         if (app->gfx_area) gtk_widget_queue_draw(app->gfx_area);
         return;
     }
@@ -4380,7 +4428,7 @@ if (!strcasecmp(name, "ERL")) {
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
                     if (!wbasic_ui_active(app)) { err_set(app, "Graphics not available in CLI/headless mode"); free(name); return false; }
-                    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) { err_set(app, "POINT requires graphics mode"); free(name); return false; }
+                    if (!video_mode_is_graphics(app->video_mode)) { err_set(app, "POINT requires graphics mode"); free(name); return false; }
                     int xi = (int)llround(xv);
                     int yi = (int)llround(yv);
                     int c = gfx_point(app, xi, yi);
@@ -6394,7 +6442,7 @@ static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
         runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
         return false;
     }
-    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+    if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "CIRCLE requires graphics mode");
         return false;
     }
@@ -6439,7 +6487,7 @@ static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
         runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
         return false;
     }
-    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+    if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "PAINT requires graphics mode");
         return false;
     }
@@ -7405,45 +7453,29 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         return false;
     }
 
-    if (mode == 0) {
-        app->video_mode = WB_VIDEO_TEXT;
-        screen_clear(app);
-        screen_render(app);
-        return true;
-    }
-    if (mode == 1) {
-        if (!wbasic_ui_active(app)) {
-            runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-            return false;
-        }
-        if (!gfx_alloc(app, 320, 200)) {
-            runtime_error(app, current_line, "Out of memory");
-            return false;
-        }
-        app->video_mode = WB_VIDEO_GFX1;
-        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
-        screen_clear(app);
-        screen_render(app);
-        return true;
-    }
-    if (mode == 2) {
-        if (!wbasic_ui_active(app)) {
-            runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-            return false;
-        }
-        if (!gfx_alloc(app, 640, 200)) {
-            runtime_error(app, current_line, "Out of memory");
-            return false;
-        }
-        app->video_mode = WB_VIDEO_GFX2;
-        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
-        screen_clear(app);
-        screen_render(app);
-        return true;
+    const ScreenModeSpec *spec = screen_mode_spec_find(mode);
+    if (!spec) {
+        runtime_error(app, current_line, "Unsupported SCREEN mode");
+        return false;
     }
 
-    runtime_error(app, current_line, "Unsupported SCREEN mode");
-    return false;
+    if ((spec->policy_flags & SCREEN_POLICY_REQUIRES_UI) && !wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+
+    if ((spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) && !gfx_alloc(app, spec->w, spec->h)) {
+        runtime_error(app, current_line, "Out of memory");
+        return false;
+    }
+
+    app->video_mode = (WbVideoMode)spec->mode;
+    if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
+        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+    }
+    screen_clear(app);
+    screen_render(app);
+    return true;
 }
 
 static bool exec_pset(App *app, Parser *p, int current_line) {
@@ -7452,7 +7484,7 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
         runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
         return false;
     }
-    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+    if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "PSET requires graphics mode");
         return false;
     }
@@ -7490,7 +7522,7 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
         runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
         return false;
     }
-    if (app->video_mode != WB_VIDEO_GFX1 && app->video_mode != WB_VIDEO_GFX2) {
+    if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "LINE requires graphics mode");
         return false;
     }
@@ -10434,7 +10466,7 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
-        if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2) {
+        if (video_mode_is_graphics(app->video_mode)) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
             screen_clear(app);
             screen_render(app);
@@ -12756,7 +12788,7 @@ static void do_immediate(App *app, const char *cmdline) {
 
     if ((starts_ci(s, "CLS") && is_word_boundary(s[3])) ||
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
-        if (starts_ci(s, "CLS") && (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX2)) {
+        if (starts_ci(s, "CLS") && (video_mode_is_graphics(app->video_mode))) {
             gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
             screen_clear(app);
             screen_render(app);
