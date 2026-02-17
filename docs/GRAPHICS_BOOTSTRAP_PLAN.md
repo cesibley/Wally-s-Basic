@@ -6,7 +6,7 @@ Drive WBASIC graphics toward practical GW-BASIC compatibility while keeping the 
 ## Current Implementation Status
 Implemented and in active use:
 - `SCREEN 0`, `SCREEN 1`, `SCREEN 2` mode switching.
-- Graphics primitives: `PSET`, `POINT`, `LINE`, `CIRCLE`, `PAINT`.
+- Graphics primitives: `PSET`, `POINT`, `LINE`, `CIRCLE`, `PAINT`, `DRAW`, `GET`, `PUT`.
 - `CLS` behavior in graphics modes.
 - Text-over-graphics overlay in `SCREEN 1` and `SCREEN 2`.
 
@@ -63,5 +63,5 @@ Current recommendation: **Policy B** (documented superset), unless a strict-comp
 - Keep GTK smoke/manual checks for overlay and rendering regressions.
 
 ## Scope Still Deferred
-- `DRAW`, graphics `GET`/`PUT`, `VIEW`, `WINDOW`, `PMAP`.
+- `VIEW`, `WINDOW`, `PMAP`.
 - Broader mode families and full GW-BASIC mode/palette matrix beyond current compatibility target.

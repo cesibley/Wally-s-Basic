@@ -6609,6 +6609,217 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
     return true;
 }
 
+typedef struct {
+    Var *v;
+    size_t start_off;
+} GfxArrayRef;
+
+static bool parse_gfx_array_ref(App *app, Parser *p, int current_line, GfxArrayRef *out) {
+    if (!app || !p || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) {
+        runtime_error(app, current_line, "GET/PUT expects array");
+        return false;
+    }
+    if (ident_is_string_var(app, name)) {
+        free(name);
+        runtime_error(app, current_line, "Type mismatch");
+        return false;
+    }
+
+    int nd = 0;
+    int idx[5] = {0,0,0,0,0};
+    bool have_idx = false;
+    skip_ws(p);
+    if (consume(p, '(')) {
+        have_idx = true;
+        if (!parse_array_indices(app, p, &nd, idx)) {
+            free(name);
+            runtime_error(app, current_line, "Bad array index");
+            return false;
+        }
+    }
+
+    Var *v = vars_lookup(app, name);
+    free(name);
+    if (!v || !v->is_array || !v->arr) {
+        runtime_error(app, current_line, "GET/PUT expects numeric array");
+        return false;
+    }
+
+    size_t start_off = 0;
+    if (have_idx) {
+        if (!array_calc_offset(v, nd, idx, &start_off)) {
+            runtime_error(app, current_line, "Subscript out of range");
+            return false;
+        }
+    }
+
+    out->v = v;
+    out->start_off = start_off;
+    return true;
+}
+
+static bool exec_get_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "GET requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "GET expects (x1,y1)-(x2,y2),array"); return false; }
+
+    double x1v = 0.0, y1v = 0.0, x2v = 0.0, y2v = 0.0;
+    if (!parse_expr(app, p, &x1v)) { runtime_error(app, current_line, "GET expects x1"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects ','"); return false; }
+    if (!parse_expr(app, p, &y1v)) { runtime_error(app, current_line, "GET expects y1"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "GET missing ')'" ); return false; }
+    if (!consume(p, '-')) { runtime_error(app, current_line, "GET expects '-'" ); return false; }
+    if (!consume(p, '(')) { runtime_error(app, current_line, "GET expects (x2,y2)"); return false; }
+    if (!parse_expr(app, p, &x2v)) { runtime_error(app, current_line, "GET expects x2"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects ','"); return false; }
+    if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "GET expects y2"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "GET missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects array"); return false; }
+
+    GfxArrayRef ar = {0};
+    if (!parse_gfx_array_ref(app, p, current_line, &ar)) return false;
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    int x1 = (int)llround(x1v);
+    int y1 = (int)llround(y1v);
+    int x2 = (int)llround(x2v);
+    int y2 = (int)llround(y2v);
+
+    int xmin = (x1 < x2) ? x1 : x2;
+    int xmax = (x1 > x2) ? x1 : x2;
+    int ymin = (y1 < y2) ? y1 : y2;
+    int ymax = (y1 > y2) ? y1 : y2;
+
+    if (xmin < 0) xmin = 0;
+    if (ymin < 0) ymin = 0;
+    if (xmax >= app->gfx_width) xmax = app->gfx_width - 1;
+    if (ymax >= app->gfx_height) ymax = app->gfx_height - 1;
+    if (xmin > xmax || ymin > ymax) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    int w = xmax - xmin + 1;
+    int h = ymax - ymin + 1;
+    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    if (ar.start_off + needed > ar.v->arr_total) {
+        runtime_error(app, current_line, "GET/PUT array too small");
+        return false;
+    }
+
+    ar.v->arr[ar.start_off] = (double)w;
+    ar.v->arr[ar.start_off + 1] = (double)h;
+
+    size_t out = ar.start_off + 2;
+    for (int yy = ymin; yy <= ymax; yy++) {
+        for (int xx = xmin; xx <= xmax; xx++) {
+            int c = gfx_point(app, xx, yy);
+            if (c < 0) c = 0;
+            ar.v->arr[out++] = (double)(c & 0x0F);
+        }
+    }
+    return true;
+}
+
+static bool exec_put_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "PUT requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PUT expects (x,y),array"); return false; }
+
+    double xv = 0.0, yv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PUT expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PUT expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PUT missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT expects array"); return false; }
+
+    GfxArrayRef ar = {0};
+    if (!parse_gfx_array_ref(app, p, current_line, &ar)) return false;
+
+    int op_mode = 0; /* PSET/copy */
+    skip_ws(p);
+    if (consume(p, ',')) {
+        skip_ws(p);
+        if (starts_ci(p->s, "PSET") && is_word_boundary(p->s[4])) {
+            op_mode = 0;
+            p->s += 4;
+        } else if (starts_ci(p->s, "OR") && is_word_boundary(p->s[2])) {
+            op_mode = 1;
+            p->s += 2;
+        } else if (starts_ci(p->s, "AND") && is_word_boundary(p->s[3])) {
+            op_mode = 2;
+            p->s += 3;
+        } else if (starts_ci(p->s, "XOR") && is_word_boundary(p->s[3])) {
+            op_mode = 3;
+            p->s += 3;
+        } else {
+            runtime_error(app, current_line, "PUT unsupported action");
+            return false;
+        }
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    if (ar.start_off + 2 > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
+    int w = (int)llround(ar.v->arr[ar.start_off]);
+    int h = (int)llround(ar.v->arr[ar.start_off + 1]);
+    if (w <= 0 || h <= 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    if (ar.start_off + needed > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
+
+    int x0 = (int)llround(xv);
+    int y0 = (int)llround(yv);
+    size_t in = ar.start_off + 2;
+
+    for (int yy = 0; yy < h; yy++) {
+        for (int xx = 0; xx < w; xx++) {
+            int dstx = x0 + xx;
+            int dsty = y0 + yy;
+            int src = ((int)llround(ar.v->arr[in++])) & 0x0F;
+
+            if (dstx < 0 || dsty < 0 || dstx >= app->gfx_width || dsty >= app->gfx_height) continue;
+
+            int oldc = gfx_point(app, dstx, dsty);
+            if (oldc < 0) oldc = 0;
+
+            int outc = src;
+            if (op_mode == 1) outc = (oldc | src) & 0x0F;
+            else if (op_mode == 2) outc = (oldc & src) & 0x0F;
+            else if (op_mode == 3) outc = (oldc ^ src) & 0x0F;
+
+            (void)gfx_pset(app, dstx, dsty, outc);
+        }
+    }
+
+    app->gfx_draw_x = x0;
+    app->gfx_draw_y = y0;
+    screen_render(app);
+    return true;
+}
+
 
 static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
@@ -10813,18 +11024,24 @@ if (starts_ci(s, "RSET") && is_word_boundary(s[4])) {
     return ok;
 }
 
-// GET #n, rec  (RANDOM)
+// GET (graphics) or GET #n,rec (RANDOM)
 if (starts_ci(s, "GET") && is_word_boundary(s[3])) {
     Parser p = { s + 3 };
-    bool ok = exec_get(app, &p, current_line);
+    skip_ws(&p);
+    bool ok = false;
+    if (*p.s == '#') ok = exec_get(app, &p, current_line);
+    else             ok = exec_get_gfx(app, &p, current_line);
     free(tmp);
     return ok;
 }
 
-// PUT #n, rec  (RANDOM)
+// PUT (graphics) or PUT #n,rec (RANDOM)
 if (starts_ci(s, "PUT") && is_word_boundary(s[3])) {
     Parser p = { s + 3 };
-    bool ok = exec_put(app, &p, current_line);
+    skip_ws(&p);
+    bool ok = false;
+    if (*p.s == '#') ok = exec_put(app, &p, current_line);
+    else             ok = exec_put_gfx(app, &p, current_line);
     free(tmp);
     return ok;
 }
