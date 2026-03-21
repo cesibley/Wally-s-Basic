@@ -35,12 +35,12 @@ extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
 #else
 #define WB_UNUSED
 #endif
-#define WBASIC_VERSION_MAJOR 1
-#define WBASIC_VERSION_MINOR 20
+#define WBASIC_VERSION_MAJOR 2
+#define WBASIC_VERSION_MINOR 0
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "1.20"
-#define WBASIC_BASELINE_DATE "2026-02-13"
-#define WBASIC_BASELINE_REV "2026-02-13 v1.20"
+#define WBASIC_VERSION_STR "2.0"
+#define WBASIC_BASELINE_DATE "2026-03-21"
+#define WBASIC_BASELINE_REV "2026-03-21 v2.0"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -850,6 +850,60 @@ typedef struct {
 } ScrollLine;
 #endif /* !WBASIC_NO_UI */
 
+typedef enum {
+    WB_VIDEO_TEXT = 0,
+    WB_VIDEO_GFX1 = 1,
+    WB_VIDEO_GFX2 = 2,
+    WB_VIDEO_GFX3 = 3,
+    WB_VIDEO_GFX7 = 7,
+    WB_VIDEO_GFX8 = 8,
+    WB_VIDEO_GFX9 = 9,
+    WB_VIDEO_GFX10 = 10,
+    WB_VIDEO_GFX11 = 11,
+    WB_VIDEO_GFX12 = 12,
+    WB_VIDEO_GFX13 = 13
+} WbVideoMode;
+
+typedef struct {
+    int mode;
+    int w;
+    int h;
+    int nominal_colors;
+    unsigned int policy_flags;
+} ScreenModeSpec;
+
+enum {
+    SCREEN_POLICY_REQUIRES_UI = 1u << 0,
+    SCREEN_POLICY_ALLOC_GFX   = 1u << 1
+};
+
+static const ScreenModeSpec k_screen_mode_specs[] = {
+    { .mode = 0,  .w = 0,   .h = 0,   .nominal_colors = 16, .policy_flags = 0 },
+    { .mode = 1,  .w = 320, .h = 200, .nominal_colors = 4,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 2,  .w = 640, .h = 200, .nominal_colors = 2,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 3,  .w = 640, .h = 400, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 7,  .w = 320, .h = 200, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 8,  .w = 640, .h = 200, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 9,  .w = 640, .h = 350, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 10, .w = 640, .h = 350, .nominal_colors = 4,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 11, .w = 640, .h = 480, .nominal_colors = 2,  .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 12, .w = 640, .h = 480, .nominal_colors = 16, .policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX },
+    { .mode = 13, .w = 320, .h = 200, .nominal_colors = 256,.policy_flags = SCREEN_POLICY_REQUIRES_UI | SCREEN_POLICY_ALLOC_GFX }
+};
+
+static bool video_mode_is_graphics(WbVideoMode mode) {
+    return mode != WB_VIDEO_TEXT;
+}
+
+static const ScreenModeSpec *screen_mode_spec_find(int mode) {
+    for (size_t i = 0; i < (sizeof(k_screen_mode_specs) / sizeof(k_screen_mode_specs[0])); i++) {
+        if (k_screen_mode_specs[i].mode == mode) {
+            return &k_screen_mode_specs[i];
+        }
+    }
+    return NULL;
+}
+
 typedef struct App {
     bool resume_from_gosub;
     GtkWidget *win;
@@ -925,6 +979,9 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
     GtkWidget *editor_view;
     UndoStack *editor_undo;
     GtkWidget *output_view;
+    GtkWidget *output_sw;
+    GtkWidget *output_stack;
+    GtkWidget *gfx_area;
 
 #ifndef WBASIC_NO_UI
     /* GTK output optimization: keep a transcript scrollback (max lines) in the GtkTextBuffer,
@@ -991,6 +1048,15 @@ int screen_rows;
 int screen_cols;
 char *screen; // size = screen_rows * screen_cols, filled with spaces
 
+/* Graphics v1 state (SCREEN 1): mode + indexed pixel buffer */
+WbVideoMode video_mode;
+int gfx_width;
+int gfx_height;
+unsigned char *gfx_pixels; /* size = gfx_width * gfx_height, color index 0..15 */
+int gfx_draw_x;
+int gfx_draw_y;
+int gfx_draw_scale; /* DRAW scale multiplier (GW-BASIC compatibility) */
+int gfx_draw_angle; /* DRAW angle quadrant 0..3 */
 
 /* Text mode COLOR state (0-15) */
 int cur_fg;   /* foreground */
@@ -1795,9 +1861,185 @@ static void screen_clear(App *app) {
     size_t n = (size_t)app->screen_rows * (size_t)app->screen_cols;
     memset(app->screen, ' ', n);
     if (app->screen_fg) memset(app->screen_fg, (unsigned char)app->cur_fg, n);
-    if (app->screen_bg) memset(app->screen_bg, (unsigned char)app->cur_bg, n);
+    int clear_bg = video_mode_is_graphics(app->video_mode) ? 16 : app->cur_bg;
+    if (app->screen_bg) memset(app->screen_bg, (unsigned char)clear_bg, n);
     app->out_row = 1;
     app->out_col = 1;
+}
+
+static void gfx_free(App *app) {
+    if (!app) return;
+    if (app->gfx_pixels) {
+        free(app->gfx_pixels);
+        app->gfx_pixels = NULL;
+    }
+    app->gfx_width = 0;
+    app->gfx_height = 0;
+}
+
+static bool gfx_alloc(App *app, int w, int h) {
+    if (!app || w <= 0 || h <= 0) return false;
+    size_t n = (size_t)w * (size_t)h;
+    unsigned char *buf = (unsigned char*)malloc(n);
+    if (!buf) return false;
+    memset(buf, 0, n);
+    gfx_free(app);
+    app->gfx_pixels = buf;
+    app->gfx_width = w;
+    app->gfx_height = h;
+    return true;
+}
+
+static void gfx_clear(App *app, unsigned char color_idx) {
+    if (!app || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) return;
+    size_t n = (size_t)app->gfx_width * (size_t)app->gfx_height;
+    memset(app->gfx_pixels, (int)(color_idx & 0x0F), n);
+}
+
+static void gfx_draw_reset_defaults(App *app) {
+    if (!app) return;
+    app->gfx_draw_x = (app->gfx_width > 0) ? (app->gfx_width / 2) : 0;
+    app->gfx_draw_y = (app->gfx_height > 0) ? (app->gfx_height / 2) : 0;
+    app->gfx_draw_scale = 1;
+    app->gfx_draw_angle = 0;
+}
+
+static bool gfx_pset(App *app, int x, int y, int color_idx) {
+    if (!app || !app->gfx_pixels) return false;
+    if (x < 0 || y < 0 || x >= app->gfx_width || y >= app->gfx_height) return true;
+    size_t idx = (size_t)y * (size_t)app->gfx_width + (size_t)x;
+    app->gfx_pixels[idx] = (unsigned char)(color_idx & 0x0F);
+    return true;
+}
+
+static int gfx_point(App *app, int x, int y) {
+    if (!app || !app->gfx_pixels) return -1;
+    if (x < 0 || y < 0 || x >= app->gfx_width || y >= app->gfx_height) return -1;
+    size_t idx = (size_t)y * (size_t)app->gfx_width + (size_t)x;
+    return (int)app->gfx_pixels[idx];
+}
+
+static void gfx_line(App *app, int x0, int y0, int x1, int y1, int color_idx) {
+    if (!app || !app->gfx_pixels) return;
+    int dx = abs(x1 - x0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        (void)gfx_pset(app, x0, y0, color_idx);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void gfx_circle_plot8(App *app, int cx, int cy, int x, int y, int color_idx) {
+    (void)gfx_pset(app, cx + x, cy + y, color_idx);
+    (void)gfx_pset(app, cx - x, cy + y, color_idx);
+    (void)gfx_pset(app, cx + x, cy - y, color_idx);
+    (void)gfx_pset(app, cx - x, cy - y, color_idx);
+    (void)gfx_pset(app, cx + y, cy + x, color_idx);
+    (void)gfx_pset(app, cx - y, cy + x, color_idx);
+    (void)gfx_pset(app, cx + y, cy - x, color_idx);
+    (void)gfx_pset(app, cx - y, cy - x, color_idx);
+}
+
+static void gfx_circle(App *app, int cx, int cy, int radius, int color_idx) {
+    if (!app || !app->gfx_pixels || radius < 0) return;
+    int x = radius;
+    int y = 0;
+    int d = 1 - radius;
+
+    while (x >= y) {
+        gfx_circle_plot8(app, cx, cy, x, y, color_idx);
+        y++;
+        if (d < 0) {
+            d += 2 * y + 1;
+        } else {
+            x--;
+            d += 2 * (y - x) + 1;
+        }
+    }
+}
+
+
+static bool gfx_paint(App *app, int sx, int sy, int color_idx, bool have_border, int border_idx) {
+    if (!app || !app->gfx_pixels) return false;
+    if (sx < 0 || sy < 0 || sx >= app->gfx_width || sy >= app->gfx_height) return true;
+
+    int w = app->gfx_width;
+    int h = app->gfx_height;
+    int newc = color_idx & 0x0F;
+    int border = border_idx & 0x0F;
+
+    size_t n = (size_t)w * (size_t)h;
+    int *queue = (int*)malloc(n * sizeof(int));
+    unsigned char *seen = (unsigned char*)calloc(n, sizeof(unsigned char));
+    if (!queue || !seen) {
+        free(queue);
+        free(seen);
+        return false;
+    }
+
+    int oldc = gfx_point(app, sx, sy);
+    if (oldc < 0) {
+        free(queue);
+        free(seen);
+        return true;
+    }
+
+    if (have_border) {
+        if (oldc == border || oldc == newc) {
+            free(queue);
+            free(seen);
+            return true;
+        }
+    } else if (oldc == newc) {
+        free(queue);
+        free(seen);
+        return true;
+    }
+
+    size_t head = 0, tail = 0;
+    int start = sy * w + sx;
+    queue[tail++] = start;
+    seen[start] = 1;
+
+    while (head < tail) {
+        int idx = queue[head++];
+        int x = idx % w;
+        int y = idx / w;
+        int c = gfx_point(app, x, y);
+
+        bool fillable = have_border ? (c != border && c != newc) : (c == oldc);
+        if (!fillable) continue;
+
+        (void)gfx_pset(app, x, y, newc);
+
+        if (x > 0) {
+            int ni = idx - 1;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (x + 1 < w) {
+            int ni = idx + 1;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (y > 0) {
+            int ni = idx - w;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+        if (y + 1 < h) {
+            int ni = idx + w;
+            if (!seen[ni]) { seen[ni] = 1; queue[tail++] = ni; }
+        }
+    }
+
+    free(seen);
+    free(queue);
+    return true;
 }
 
 #ifndef WBASIC_NO_UI
@@ -2073,6 +2315,12 @@ static WB_UNUSED const char *vga16_hex[16] = {
     "#FF5555", "#FF55FF", "#FFFF55", "#FFFFFF"
 };
 
+static const unsigned char vga16_rgb[16][3] = {
+    {0x00,0x00,0x00}, {0x00,0x00,0xAA}, {0x00,0xAA,0x00}, {0x00,0xAA,0xAA},
+    {0xAA,0x00,0x00}, {0xAA,0x00,0xAA}, {0xAA,0x55,0x00}, {0xAA,0xAA,0xAA},
+    {0x55,0x55,0x55}, {0x55,0x55,0xFF}, {0x55,0xFF,0x55}, {0x55,0xFF,0xFF},
+    {0xFF,0x55,0x55}, {0xFF,0x55,0xFF}, {0xFF,0xFF,0x55}, {0xFF,0xFF,0xFF}
+};
 
 #ifndef WBASIC_NO_UI
 
@@ -2151,13 +2399,189 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 #ifndef WBASIC_NO_UI
 
+static void ui_update_output_mode(App *app) {
+    if (!app || !app->output_stack) return;
+    if (video_mode_is_graphics(app->video_mode)) {
+        gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "gfx");
+    } else {
+        gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "text");
+    }
+}
+
+static void ui_color_idx_to_rgb(const App *app, int idx, double *r, double *g, double *b, bool for_bg) {
+    if (!r || !g || !b) return;
+    if (idx == 16) {
+        if (for_bg && app && app->have_bg) {
+            *r = app->bg_color.red;
+            *g = app->bg_color.green;
+            *b = app->bg_color.blue;
+            return;
+        }
+        if (!for_bg && app && app->have_fg) {
+            *r = app->fg_color.red;
+            *g = app->fg_color.green;
+            *b = app->fg_color.blue;
+            return;
+        }
+        idx = for_bg ? 0 : 7;
+    }
+    idx &= 0x0F;
+    *r = (double)vga16_rgb[idx][0] / 255.0;
+    *g = (double)vga16_rgb[idx][1] / 255.0;
+    *b = (double)vga16_rgb[idx][2] / 255.0;
+}
+
+static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
+                                     double ox, double oy,
+                                     double draw_w, double draw_h) {
+    if (!app || !app->screen || app->screen_rows <= 0 || app->screen_cols <= 0) return;
+
+    int R = app->screen_rows;
+    int C = app->screen_cols;
+    double cell_w = draw_w / (double)C;
+    double cell_h = draw_h / (double)R;
+    if (cell_w <= 0.0 || cell_h <= 0.0) return;
+
+    cairo_save(cr);
+    cairo_translate(cr, ox, oy);
+    cairo_select_font_face(cr, "Monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+
+    /* Keep glyphs within cell bounds: SCREEN 1/2 often have much taller rows than columns,
+       so purely height-based sizing causes horizontal overlap (e.g., "COLOR" -> "CCLOR"). */
+    double fs_h = cell_h * 0.82;
+    double fs_w = cell_w * 1.45;
+    double font_sz = fs_h;
+    if (fs_w < font_sz) font_sz = fs_w;
+    if (font_sz < 6.0) font_sz = 6.0;
+    cairo_set_font_size(cr, font_sz);
+
+    cairo_font_extents_t fe;
+    cairo_font_extents(cr, &fe);
+    double y_base_off = (cell_h - fe.height) * 0.5 + fe.ascent;
+
+    /* Pass 1: draw text-cell backgrounds first so later cells never erase earlier glyphs. */
+    for (int r = 0; r < R; r++) {
+        for (int c = 0; c < C; c++) {
+            size_t idx = (size_t)r * (size_t)C + (size_t)c;
+            int bg = app->screen_bg ? app->screen_bg[idx] : app->cur_bg;
+            if (bg < 0) bg = 0;
+            if (bg == 16) continue;
+
+            double x = (double)c * cell_w;
+            double y = (double)r * cell_h;
+            double br, bgc, bb;
+            ui_color_idx_to_rgb(app, bg, &br, &bgc, &bb, true);
+            cairo_set_source_rgb(cr, br, bgc, bb);
+            cairo_rectangle(cr, floor(x), floor(y), ceil(cell_w), ceil(cell_h));
+            cairo_fill(cr);
+        }
+    }
+
+    /* Pass 2: draw glyphs on top. */
+    for (int r = 0; r < R; r++) {
+        for (int c = 0; c < C; c++) {
+            size_t idx = (size_t)r * (size_t)C + (size_t)c;
+            char ch = app->screen[idx];
+            int fg = app->screen_fg ? app->screen_fg[idx] : app->cur_fg;
+            if (fg < 0) fg = 7;
+            if (ch == ' ') continue;
+
+            double x = (double)c * cell_w;
+            double y = (double)r * cell_h;
+            double fr, fgc, fb;
+            ui_color_idx_to_rgb(app, fg, &fr, &fgc, &fb, false);
+            cairo_set_source_rgb(cr, fr, fgc, fb);
+
+            char txt[2] = { ch, 0 };
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, txt, &te);
+            double tx = x + (cell_w - te.x_advance) * 0.5;
+            if (tx < x) tx = x;
+            cairo_move_to(cr, tx, y + y_base_off);
+            cairo_show_text(cr, txt);
+        }
+    }
+
+    cairo_restore(cr);
+}
+
+static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+    (void)widget;
+    App *app = (App*)user_data;
+    if (!app) return FALSE;
+
+    int ww = gtk_widget_get_allocated_width(app->gfx_area);
+    int wh = gtk_widget_get_allocated_height(app->gfx_area);
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_paint(cr);
+
+    if (ww <= 0 || wh <= 0 || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) {
+        return FALSE;
+    }
+
+    int w = app->gfx_width;
+    int h = app->gfx_height;
+    size_t n = (size_t)w * (size_t)h;
+    guint32 *pix = (guint32*)g_malloc((gsize)(n * sizeof(guint32)));
+    if (!pix) return FALSE;
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = app->gfx_pixels[i] & 0x0F;
+        unsigned char r = vga16_rgb[c][0];
+        unsigned char g = vga16_rgb[c][1];
+        unsigned char b = vga16_rgb[c][2];
+        pix[i] = (0xFFu << 24) | ((guint32)r << 16) | ((guint32)g << 8) | (guint32)b;
+    }
+
+    cairo_surface_t *surf = cairo_image_surface_create_for_data((unsigned char*)pix,
+                                                                CAIRO_FORMAT_ARGB32,
+                                                                w, h, w * 4);
+
+    /* Graphics modes are presented in a fixed 4:3 viewport for consistent display. */
+    double target_aspect = 4.0 / 3.0;
+
+    double draw_w = (double)ww;
+    double draw_h = draw_w / target_aspect;
+    if (draw_h > (double)wh) {
+        draw_h = (double)wh;
+        draw_w = draw_h * target_aspect;
+    }
+
+    if (draw_w <= 0.0 || draw_h <= 0.0) {
+        cairo_surface_destroy(surf);
+        g_free(pix);
+        return FALSE;
+    }
+
+    double ox = ((double)ww - draw_w) * 0.5;
+    double oy = ((double)wh - draw_h) * 0.5;
+    double sx = draw_w / (double)w;
+    double sy = draw_h / (double)h;
+
+    cairo_save(cr);
+    cairo_translate(cr, ox, oy);
+    cairo_scale(cr, sx, sy);
+    cairo_set_source_surface(cr, surf, 0.0, 0.0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+    cairo_restore(cr);
+
+    ui_draw_gfx_text_overlay(app, cr, ox, oy, draw_w, draw_h);
+
+    cairo_surface_destroy(surf);
+    g_free(pix);
+    return FALSE;
+}
 
 static void screen_render_now(App *app) {
     if (!wbasic_ui_active(app)) return;
-    screen_ensure(app);
-    if (!app->screen || !app->output_buf || !app->output_view) return;
+    if (!app->output_buf || !app->output_view) return;
 
-    int R = app->screen_rows, C = app->screen_cols;
+    ui_update_output_mode(app);
+    if (video_mode_is_graphics(app->video_mode)) {
+        if (app->gfx_area) gtk_widget_queue_draw(app->gfx_area);
+        return;
+    }
 
     /* While a program is RUNNING, keep the view pinned to the bottom. */
     GtkAdjustment *vadj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(app->output_view));
@@ -2174,13 +2598,17 @@ static void screen_render_now(App *app) {
     }
 
     /* Delete and rebuild ONLY the current screen region (below the mark). */
-    GtkTextIter start, end;
-    gtk_text_buffer_get_iter_at_mark(app->output_buf, &start, screen_mark);
-    gtk_text_buffer_get_end_iter(app->output_buf, &end);
-    gtk_text_buffer_delete(app->output_buf, &start, &end);
+    GtkTextIter start_it, end_it;
+    gtk_text_buffer_get_iter_at_mark(app->output_buf, &start_it, screen_mark);
+    gtk_text_buffer_get_end_iter(app->output_buf, &end_it);
+    gtk_text_buffer_delete(app->output_buf, &start_it, &end_it);
 
     GtkTextIter it;
     gtk_text_buffer_get_iter_at_mark(app->output_buf, &it, screen_mark);
+
+    screen_ensure(app);
+    if (!app->screen) return;
+    int R = app->screen_rows, C = app->screen_cols;
 
     for (int r = 0; r < R; r++) {
         const char *rowp = app->screen + (size_t)r * (size_t)C;
@@ -2208,7 +2636,7 @@ static void screen_render_now(App *app) {
             gtk_text_buffer_insert_with_tags_by_name(app->output_buf, &it,
                                                      rowp + c, run,
                                                      tagname[0] ? tagname : NULL,
-    NULL);
+                                                     NULL);
             c += run;
         }
 
@@ -2226,6 +2654,7 @@ static void screen_render_now(App *app) {
         gtk_adjustment_set_value(vadj, maxv);
     }
 }
+
 
 /* Throttled screen rendering: coalesce many writes into one GTK update */
 /* Render throttle: at most ~60fps via timeout */
@@ -3829,7 +4258,7 @@ if (!strcasecmp(name, "ERL")) {
                 !strcasecmp(name, "EXP") || !strcasecmp(name, "ABS") || !strcasecmp(name, "INT") ||
                 !strcasecmp(name, "SGN") || !strcasecmp(name, "FIX") || !strcasecmp(name, "CINT") ||
                 !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") || !strcasecmp(name, "LOF") || !strcasecmp(name, "SEEK") || !strcasecmp(name, "CVI") || !strcasecmp(name, "CVS") || !strcasecmp(name, "CVD") ||
-                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND")) {
+                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND") || !strcasecmp(name, "POINT")) {
 
                 consume(p, '(');
                 /* EOF(n) returns -1 at EOF, else 0. */
@@ -4003,6 +4432,22 @@ if (!strcasecmp(name, "ERL")) {
                     return true;
                 }
 
+                if (!strcasecmp(name, "POINT")) {
+                    double xv = 0.0, yv = 0.0;
+                    if (!parse_expr(app, p, &xv)) { free(name); return false; }
+                    if (!consume(p, ',')) { free(name); return false; }
+                    if (!parse_expr(app, p, &yv)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    if (!wbasic_ui_active(app)) { err_set(app, "Graphics not available in CLI/headless mode"); free(name); return false; }
+                    if (!video_mode_is_graphics(app->video_mode)) { err_set(app, "POINT requires graphics mode"); free(name); return false; }
+                    int xi = (int)llround(xv);
+                    int yi = (int)llround(yv);
+                    int c = gfx_point(app, xi, yi);
+                    *out = (c < 0) ? -1.0 : (double)c;
+                    free(name);
+                    return true;
+                }
 
                 double arg = 0.0;
                 if (!parse_expr(app, p, &arg)) { free(name); return false; }
@@ -6002,6 +6447,477 @@ static void field_write_slice(BasicFile *bf, FieldMap *fm, const char *src, bool
     }
 }
 
+
+static void gfx_draw_move(App *app, int *x, int *y, int nx, int ny, int color, bool draw_line) {
+    if (draw_line) gfx_line(app, *x, *y, nx, ny, color);
+    *x = nx;
+    *y = ny;
+}
+
+static void gfx_draw_rotate_quadrant(int angle, int vx, int vy, int *rx, int *ry) {
+    int a = angle & 3;
+    if (a == 0) { *rx = vx;  *ry = vy; return; }
+    if (a == 1) { *rx = vy;  *ry = -vx; return; }
+    if (a == 2) { *rx = -vx; *ry = -vy; return; }
+    *rx = -vy; *ry = vx;
+}
+
+static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "DRAW requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    char *script = NULL;
+    if (!parse_string_value(app, p, &script)) {
+        runtime_error(app, current_line, "DRAW expects string");
+        return false;
+    }
+    skip_ws(p);
+    if (*p->s != '\0') {
+        free(script);
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+
+    int x = app->gfx_draw_x;
+    int y = app->gfx_draw_y;
+    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 1;
+    int angle = app->gfx_draw_angle & 3;
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+
+    const char *q = script;
+    while (*q) {
+        while (*q && (isspace((unsigned char)*q) || *q == ';' || *q == ',')) q++;
+        if (!*q) break;
+
+        bool blank = false;
+        bool no_update = false;
+        while (*q == 'B' || *q == 'b' || *q == 'N' || *q == 'n') {
+            if (*q == 'B' || *q == 'b') blank = true;
+            if (*q == 'N' || *q == 'n') no_update = true;
+            q++;
+        }
+
+        char cmd = (char)toupper((unsigned char)*q);
+        if (!cmd) break;
+        q++;
+
+        int n = 0;
+        bool have_n = false;
+        if (cmd != 'M') {
+            while (*q && isdigit((unsigned char)*q)) {
+                have_n = true;
+                n = n * 10 + (*q - '0');
+                q++;
+            }
+            if (!have_n && *q == '=') {
+                Parser np = { .s = q + 1 };
+                double nv = 0.0;
+                if (!parse_expr(app, &np, &nv)) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = np.s;
+                n = (int)nv;
+                have_n = true;
+            }
+        }
+
+        int oldx = x, oldy = y;
+        int dx = 0, dy = 0;
+
+        switch (cmd) {
+            case 'U': dx = 0; dy = -1; break;
+            case 'D': dx = 0; dy = 1; break;
+            case 'L': dx = -1; dy = 0; break;
+            case 'R': dx = 1; dy = 0; break;
+            case 'E': dx = 1; dy = -1; break;
+            case 'F': dx = 1; dy = 1; break;
+            case 'G': dx = -1; dy = 1; break;
+            case 'H': dx = -1; dy = -1; break;
+            case 'A': {
+                if (!have_n || n < 0 || n > 3) { free(script); runtime_error(app, current_line, "DRAW bad angle"); return false; }
+                angle = n & 3;
+                continue;
+            }
+            case 'C': {
+                if (!have_n || n < 0 || n > 15) { free(script); runtime_error(app, current_line, "Bad color"); return false; }
+                color = n;
+                continue;
+            }
+            case 'S': {
+                if (!have_n || n < 1 || n > 255) { free(script); runtime_error(app, current_line, "Illegal function call"); return false; }
+                scale = n;
+                continue;
+            }
+            case 'M': {
+                while (*q && isspace((unsigned char)*q)) q++;
+                bool rel = false;
+                if (*q == '+' || *q == '-') {
+                    rel = true;
+                }
+                char *end = NULL;
+                long xv = strtol(q, &end, 10);
+                if (end == q) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = end;
+                while (*q && isspace((unsigned char)*q)) q++;
+                if (*q != ',') { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q++;
+                while (*q && isspace((unsigned char)*q)) q++;
+                long yv = strtol(q, &end, 10);
+                if (end == q) { free(script); runtime_error(app, current_line, "Syntax error"); return false; }
+                q = end;
+
+                int nx, ny;
+                if (rel) {
+                    int rx = 0, ry = 0;
+                    gfx_draw_rotate_quadrant(angle, (int)xv * scale, (int)yv * scale, &rx, &ry);
+                    nx = x + rx;
+                    ny = y + ry;
+                } else {
+                    nx = (int)xv;
+                    ny = (int)yv;
+                }
+                gfx_draw_move(app, &x, &y, nx, ny, color, !blank);
+                if (no_update) { x = oldx; y = oldy; }
+                continue;
+            }
+            default:
+                free(script);
+                runtime_error(app, current_line, "Syntax error");
+                return false;
+        }
+
+        int count = have_n ? n : 1;
+        int rx = 0, ry = 0;
+        gfx_draw_rotate_quadrant(angle, dx * scale * count, dy * scale * count, &rx, &ry);
+        gfx_draw_move(app, &x, &y, x + rx, y + ry, color, !blank);
+        if (no_update) { x = oldx; y = oldy; }
+    }
+
+    free(script);
+    app->gfx_draw_x = x;
+    app->gfx_draw_y = y;
+    app->gfx_draw_scale = scale;
+    app->gfx_draw_angle = angle;
+    app->cur_fg = color;
+    screen_render(app);
+    return true;
+}
+
+typedef struct {
+    Var *v;
+    size_t start_off;
+} GfxArrayRef;
+
+static bool parse_gfx_array_ref(App *app, Parser *p, int current_line, GfxArrayRef *out) {
+    if (!app || !p || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    char *name = NULL;
+    if (!parse_identifier(p, &name)) {
+        runtime_error(app, current_line, "GET/PUT expects array");
+        return false;
+    }
+    if (ident_is_string_var(app, name)) {
+        free(name);
+        runtime_error(app, current_line, "Type mismatch");
+        return false;
+    }
+
+    int nd = 0;
+    int idx[5] = {0,0,0,0,0};
+    bool have_idx = false;
+    skip_ws(p);
+    if (consume(p, '(')) {
+        have_idx = true;
+        if (!parse_array_indices(app, p, &nd, idx)) {
+            free(name);
+            runtime_error(app, current_line, "Bad array index");
+            return false;
+        }
+    }
+
+    Var *v = vars_lookup(app, name);
+    free(name);
+    if (!v || !v->is_array || !v->arr) {
+        runtime_error(app, current_line, "GET/PUT expects numeric array");
+        return false;
+    }
+
+    size_t start_off = 0;
+    if (have_idx) {
+        if (!array_calc_offset(v, nd, idx, &start_off)) {
+            runtime_error(app, current_line, "Subscript out of range");
+            return false;
+        }
+    }
+
+    out->v = v;
+    out->start_off = start_off;
+    return true;
+}
+
+static bool exec_get_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "GET requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "GET expects (x1,y1)-(x2,y2),array"); return false; }
+
+    double x1v = 0.0, y1v = 0.0, x2v = 0.0, y2v = 0.0;
+    if (!parse_expr(app, p, &x1v)) { runtime_error(app, current_line, "GET expects x1"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects ','"); return false; }
+    if (!parse_expr(app, p, &y1v)) { runtime_error(app, current_line, "GET expects y1"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "GET missing ')'" ); return false; }
+    if (!consume(p, '-')) { runtime_error(app, current_line, "GET expects '-'" ); return false; }
+    if (!consume(p, '(')) { runtime_error(app, current_line, "GET expects (x2,y2)"); return false; }
+    if (!parse_expr(app, p, &x2v)) { runtime_error(app, current_line, "GET expects x2"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects ','"); return false; }
+    if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "GET expects y2"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "GET missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "GET expects array"); return false; }
+
+    GfxArrayRef ar = {0};
+    if (!parse_gfx_array_ref(app, p, current_line, &ar)) return false;
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    int x1 = (int)llround(x1v);
+    int y1 = (int)llround(y1v);
+    int x2 = (int)llround(x2v);
+    int y2 = (int)llround(y2v);
+
+    int xmin = (x1 < x2) ? x1 : x2;
+    int xmax = (x1 > x2) ? x1 : x2;
+    int ymin = (y1 < y2) ? y1 : y2;
+    int ymax = (y1 > y2) ? y1 : y2;
+
+    if (xmin < 0) xmin = 0;
+    if (ymin < 0) ymin = 0;
+    if (xmax >= app->gfx_width) xmax = app->gfx_width - 1;
+    if (ymax >= app->gfx_height) ymax = app->gfx_height - 1;
+    if (xmin > xmax || ymin > ymax) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    int w = xmax - xmin + 1;
+    int h = ymax - ymin + 1;
+    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    if (ar.start_off + needed > ar.v->arr_total) {
+        runtime_error(app, current_line, "GET/PUT array too small");
+        return false;
+    }
+
+    ar.v->arr[ar.start_off] = (double)w;
+    ar.v->arr[ar.start_off + 1] = (double)h;
+
+    size_t out = ar.start_off + 2;
+    for (int yy = ymin; yy <= ymax; yy++) {
+        for (int xx = xmin; xx <= xmax; xx++) {
+            int c = gfx_point(app, xx, yy);
+            if (c < 0) c = 0;
+            ar.v->arr[out++] = (double)(c & 0x0F);
+        }
+    }
+    return true;
+}
+
+static bool exec_put_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "PUT requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PUT expects (x,y),array"); return false; }
+
+    double xv = 0.0, yv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PUT expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PUT expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PUT missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PUT expects array"); return false; }
+
+    GfxArrayRef ar = {0};
+    if (!parse_gfx_array_ref(app, p, current_line, &ar)) return false;
+
+    int op_mode = 0; /* PSET/copy */
+    skip_ws(p);
+    if (consume(p, ',')) {
+        skip_ws(p);
+        if (starts_ci(p->s, "PSET") && is_word_boundary(p->s[4])) {
+            op_mode = 0;
+            p->s += 4;
+        } else if (starts_ci(p->s, "OR") && is_word_boundary(p->s[2])) {
+            op_mode = 1;
+            p->s += 2;
+        } else if (starts_ci(p->s, "AND") && is_word_boundary(p->s[3])) {
+            op_mode = 2;
+            p->s += 3;
+        } else if (starts_ci(p->s, "XOR") && is_word_boundary(p->s[3])) {
+            op_mode = 3;
+            p->s += 3;
+        } else {
+            runtime_error(app, current_line, "PUT unsupported action");
+            return false;
+        }
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    if (ar.start_off + 2 > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
+    int w = (int)llround(ar.v->arr[ar.start_off]);
+    int h = (int)llround(ar.v->arr[ar.start_off + 1]);
+    if (w <= 0 || h <= 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    if (ar.start_off + needed > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
+
+    int x0 = (int)llround(xv);
+    int y0 = (int)llround(yv);
+    size_t in = ar.start_off + 2;
+
+    for (int yy = 0; yy < h; yy++) {
+        for (int xx = 0; xx < w; xx++) {
+            int dstx = x0 + xx;
+            int dsty = y0 + yy;
+            int src = ((int)llround(ar.v->arr[in++])) & 0x0F;
+
+            if (dstx < 0 || dsty < 0 || dstx >= app->gfx_width || dsty >= app->gfx_height) continue;
+
+            int oldc = gfx_point(app, dstx, dsty);
+            if (oldc < 0) oldc = 0;
+
+            int outc = src;
+            if (op_mode == 1) outc = (oldc | src) & 0x0F;
+            else if (op_mode == 2) outc = (oldc & src) & 0x0F;
+            else if (op_mode == 3) outc = (oldc ^ src) & 0x0F;
+
+            (void)gfx_pset(app, dstx, dsty, outc);
+        }
+    }
+
+    app->gfx_draw_x = x0;
+    app->gfx_draw_y = y0;
+    screen_render(app);
+    return true;
+}
+
+
+static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "CIRCLE requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "CIRCLE expects (x,y),r"); return false; }
+
+    double xv = 0.0, yv = 0.0, rv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "CIRCLE expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "CIRCLE expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "CIRCLE expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "CIRCLE missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
+    if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
+
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "CIRCLE expects color"); return false; }
+        color = (int)llround(cv);
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int r = (int)llround(rv);
+    if (r < 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    gfx_circle(app, x, y, r, color);
+    screen_render(app);
+    return true;
+}
+
+
+static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "PAINT requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PAINT expects (x,y),color"); return false; }
+
+    double xv = 0.0, yv = 0.0, cv = 0.0;
+    bool have_border = false;
+    int border = 0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PAINT expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PAINT expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PAINT missing ')'" ); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+    if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+
+    /* Optional border color argument for boundary fill semantics. */
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double bv = 0.0;
+        if (!parse_expr(app, p, &bv)) { runtime_error(app, current_line, "PAINT expects border"); return false; }
+        border = (int)llround(bv);
+        have_border = true;
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+
+    int color = (int)llround(cv);
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    if (!gfx_paint(app, x, y, color, have_border, border)) {
+        runtime_error(app, current_line, "Out of memory");
+        return false;
+    }
+
+    app->gfx_draw_x = x;
+    app->gfx_draw_y = y;
+    screen_render(app);
+    return true;
+}
+
 /* ---- File I/O helpers ---- */
 static void files_close_all(App *app);
 static BasicFile *file_get(App *app, int n);
@@ -6861,7 +7777,12 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     }
 
     if (have_fg) {
-        if (new_fg < 0 || new_fg > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+        /*
+           GW-BASIC accepts foreground values 0..31 for COLOR attributes
+           (high bit range carries intensity/blink semantics).
+           WBASIC stores the full attribute value for compatibility.
+        */
+        if (new_fg < 0 || new_fg > 31) { runtime_error(app, current_line, "Bad color"); return false; }
         app->cur_fg = new_fg;
     }
     if (have_bg) {
@@ -6873,7 +7794,266 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     return true;
 }
 
+static bool exec_screen(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    skip_ws(p);
 
+    double mode_v = 0.0;
+    if (!parse_expr(app, p, &mode_v)) {
+        runtime_error(app, current_line, "SCREEN expects mode");
+        return false;
+    }
+    int mode = (int)llround(mode_v);
+
+    /*
+       GW-BASIC accepts optional SCREEN arguments:
+         SCREEN mode[,colorburst][,apage][,vpage]
+       For compatibility we parse (and currently ignore) up to three optional
+       numeric expressions after mode.
+    */
+    skip_ws(p);
+    int opt_count = 0;
+    while (*p->s == ',') {
+        p->s++;
+        opt_count++;
+        if (opt_count > 3) {
+            runtime_error(app, current_line, "Syntax error");
+            return false;
+        }
+
+        skip_ws(p);
+        if (*p->s == ',' || *p->s == '\0') {
+            /* Empty optional argument is allowed (e.g., SCREEN 0,,0) */
+            continue;
+        }
+
+        double ignored = 0.0;
+        if (!parse_expr(app, p, &ignored)) {
+            runtime_error(app, current_line, "Syntax error");
+            return false;
+        }
+        skip_ws(p);
+    }
+
+    if (*p->s != '\0') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+
+    const ScreenModeSpec *spec = screen_mode_spec_find(mode);
+    if (!spec) {
+        runtime_error(app, current_line, "Unsupported SCREEN mode");
+        return false;
+    }
+
+    if ((spec->policy_flags & SCREEN_POLICY_REQUIRES_UI) && !wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+
+    if ((spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) && !gfx_alloc(app, spec->w, spec->h)) {
+        runtime_error(app, current_line, "Out of memory");
+        return false;
+    }
+
+    app->video_mode = (WbVideoMode)spec->mode;
+    if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
+        gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+        gfx_draw_reset_defaults(app);
+    }
+    screen_clear(app);
+    screen_render(app);
+    return true;
+}
+
+static bool exec_pset(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "PSET requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PSET expects (x,y)"); return false; }
+
+    double xv = 0.0, yv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PSET expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PSET expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PSET expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PSET missing ')'"); return false; }
+
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PSET expects color"); return false; }
+        color = (int)llround(cv);
+    }
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    bool ok = gfx_pset(app, x, y, color);
+    if (ok) {
+        app->gfx_draw_x = x;
+        app->gfx_draw_y = y;
+        screen_render(app);
+    }
+    return ok;
+}
+
+static bool exec_line_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    if (!wbasic_ui_active(app)) {
+        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+        return false;
+    }
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "LINE requires graphics mode");
+        return false;
+    }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "LINE expects (x1,y1)-(x2,y2)"); return false; }
+
+    double x1v = 0.0, y1v = 0.0, x2v = 0.0, y2v = 0.0;
+    if (!parse_expr(app, p, &x1v)) { runtime_error(app, current_line, "LINE expects x1"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "LINE expects ','"); return false; }
+    if (!parse_expr(app, p, &y1v)) { runtime_error(app, current_line, "LINE expects y1"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
+    skip_ws(p);
+    if (!consume(p, '-')) { runtime_error(app, current_line, "LINE expects '-'" ); return false; }
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "LINE expects (x2,y2)"); return false; }
+    if (!parse_expr(app, p, &x2v)) { runtime_error(app, current_line, "LINE expects x2"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "LINE expects ','"); return false; }
+    if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "LINE expects y2"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
+
+    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    int draw_mode = 0; /* 0=line, 1=box, 2=boxfill */
+
+    skip_ws(p);
+    if (consume(p, ',')) {
+        bool color_set = false;
+        bool mode_set = false;
+
+        skip_ws(p);
+
+        bool color_omitted = false;
+
+        /* Optional [attribute], including omitted attribute in forms like LINE ...,,B. */
+        if (consume(p, ',')) {
+            color_omitted = true;
+        } else {
+            const char *t = p->s;
+            if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                draw_mode = 2;
+                mode_set = true;
+                p->s += 2;
+            } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                draw_mode = 1;
+                mode_set = true;
+                p->s += 1;
+            } else {
+                double cv = 0.0;
+                if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "LINE expects color"); return false; }
+                color = (int)llround(cv);
+                color_set = true;
+            }
+        }
+
+        /* Omitted color form: LINE ...,,B / LINE ...,,BF */
+        if (color_omitted && !mode_set) {
+            skip_ws(p);
+            const char *t = p->s;
+            if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                draw_mode = 2;
+                mode_set = true;
+                p->s += 2;
+            } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                draw_mode = 1;
+                mode_set = true;
+                p->s += 1;
+            }
+        }
+
+        skip_ws(p);
+        if (consume(p, ',')) {
+            skip_ws(p);
+
+            if (!mode_set) {
+                const char *t = p->s;
+                if ((t[0] == 'B' || t[0] == 'b') && (t[1] == 'F' || t[1] == 'f') && is_word_boundary(t[2])) {
+                    draw_mode = 2;
+                    mode_set = true;
+                    p->s += 2;
+                } else if ((t[0] == 'B' || t[0] == 'b') && is_word_boundary(t[1])) {
+                    draw_mode = 1;
+                    mode_set = true;
+                    p->s += 1;
+                } else {
+                    double stylev = 0.0;
+                    if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+                }
+            } else {
+                double stylev = 0.0;
+                if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+            }
+
+            skip_ws(p);
+            if (consume(p, ',')) {
+                double stylev = 0.0;
+                if (!parse_expr(app, p, &stylev)) { runtime_error(app, current_line, "Syntax error"); return false; }
+                (void)stylev;
+            }
+        } else if (!color_set && mode_set) {
+            /* LINE ...,B (or BF) with no style */
+        }
+    }
+
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x1 = (int)llround(x1v);
+    int y1 = (int)llround(y1v);
+    int x2 = (int)llround(x2v);
+    int y2 = (int)llround(y2v);
+
+    if (draw_mode == 0) {
+        gfx_line(app, x1, y1, x2, y2, color);
+    } else {
+        int xmin = (x1 < x2) ? x1 : x2;
+        int xmax = (x1 > x2) ? x1 : x2;
+        int ymin = (y1 < y2) ? y1 : y2;
+        int ymax = (y1 > y2) ? y1 : y2;
+
+        if (draw_mode == 1) {
+            gfx_line(app, xmin, ymin, xmax, ymin, color);
+            gfx_line(app, xmax, ymin, xmax, ymax, color);
+            gfx_line(app, xmax, ymax, xmin, ymax, color);
+            gfx_line(app, xmin, ymax, xmin, ymin, color);
+        } else {
+            for (int y = ymin; y <= ymax; y++) {
+                gfx_line(app, xmin, y, xmax, y, color);
+            }
+        }
+    }
+
+    app->gfx_draw_x = x2;
+    app->gfx_draw_y = y2;
+    screen_render(app);
+    return true;
+}
 
 /* ---- File I/O helpers ---- */
 
@@ -9680,14 +10860,60 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
 
     // CLS (screen/output clear)
     if (starts_ci(s, "CLS") && is_word_boundary(s[3])) {
-        out_clear(app, true);
+        if (video_mode_is_graphics(app->video_mode)) {
+            gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            gfx_draw_reset_defaults(app);
+            screen_clear(app);
+            screen_render(app);
+        } else {
+            out_clear(app, true);
+        }
         free(tmp);
         return true;
     }
 
+    if (starts_ci(s, "SCREEN") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_screen(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
+    if (starts_ci(s, "PSET") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_pset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
-    
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (!(starts_ci(t, "INPUT") && is_word_boundary(t[5]))) {
+            Parser p = { s + 4 };
+            bool ok = exec_line_gfx(app, &p, current_line);
+            free(tmp);
+            return ok;
+        }
+    }
+    if (starts_ci(s, "CIRCLE") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_circle_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PAINT") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_paint_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "DRAW") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_draw_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
 // CLEAR [expr[,expr[,expr]]]  (GW-BASIC compatibility: clear variables/arrays, close files, reset stacks; ignore sizing args)
 if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
@@ -9798,18 +11024,24 @@ if (starts_ci(s, "RSET") && is_word_boundary(s[4])) {
     return ok;
 }
 
-// GET #n, rec  (RANDOM)
+// GET (graphics) or GET #n,rec (RANDOM)
 if (starts_ci(s, "GET") && is_word_boundary(s[3])) {
     Parser p = { s + 3 };
-    bool ok = exec_get(app, &p, current_line);
+    skip_ws(&p);
+    bool ok = false;
+    if (*p.s == '#') ok = exec_get(app, &p, current_line);
+    else             ok = exec_get_gfx(app, &p, current_line);
     free(tmp);
     return ok;
 }
 
-// PUT #n, rec  (RANDOM)
+// PUT (graphics) or PUT #n,rec (RANDOM)
 if (starts_ci(s, "PUT") && is_word_boundary(s[3])) {
     Parser p = { s + 3 };
-    bool ok = exec_put(app, &p, current_line);
+    skip_ws(&p);
+    bool ok = false;
+    if (*p.s == '#') ok = exec_put(app, &p, current_line);
+    else             ok = exec_put_gfx(app, &p, current_line);
     free(tmp);
     return ok;
 }
@@ -10514,6 +11746,48 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
         return ok;
     }
 
+    /* Second-chance graphics command dispatch (prevents fall-through to assignment parser). */
+    if (starts_ci(s, "SCREEN") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_screen(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PSET") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_pset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
+        char *t = s + 4;
+        while (*t && isspace((unsigned char)*t)) t++;
+        if (!(starts_ci(t, "INPUT") && is_word_boundary(t[5]))) {
+            Parser p = { s + 4 };
+            bool ok = exec_line_gfx(app, &p, current_line);
+            free(tmp);
+            return ok;
+        }
+    }
+    if (starts_ci(s, "CIRCLE") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_circle_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "PAINT") && is_word_boundary(s[5])) {
+        Parser p = { s + 5 };
+        bool ok = exec_paint_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "DRAW") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_draw_gfx(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+
     // LET (optional)
     if (starts_ci(s, "LET") && is_word_boundary(s[3])) {
         s = trim(s + 3);
@@ -11147,7 +12421,16 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
 
 static void key_macro_queue_clear(App *app);
 
+static void run_apply_default_screen0(App *app) {
+    if (!app) return;
+    app->video_mode = WB_VIDEO_TEXT;
+    screen_clear(app);
+    screen_render(app);
+}
+
 static void do_run(App *app) {
+
+    run_apply_default_screen0(app);
 
         // Ensure each RUN starts with Preferences exact colors (until BASIC COLOR is used).
         app->cur_fg = 16;
@@ -11217,6 +12500,7 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
     }
 
     /* Reset colors to preference defaults until BASIC COLOR is used */
+    run_apply_default_screen0(app);
     app->cur_fg = 16;
     app->cur_bg = 16;
         if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
@@ -11917,7 +13201,14 @@ static void do_immediate(App *app, const char *cmdline) {
 
     if ((starts_ci(s, "CLS") && is_word_boundary(s[3])) ||
         (starts_ci(s, "CLEAR")&& is_word_boundary(s[5]))) {
-        out_clear(app, true);
+        if (starts_ci(s, "CLS") && (video_mode_is_graphics(app->video_mode))) {
+            gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
+            gfx_draw_reset_defaults(app);
+            screen_clear(app);
+            screen_render(app);
+        } else {
+            out_clear(app, true);
+        }
         free(tmp);
         return;
     }
@@ -12357,7 +13648,7 @@ static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "February 13, 2026";
+const char *about_line3 = "March 21, 2026";
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
@@ -13053,6 +14344,14 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
     gtk_widget_set_halign(lbl, GTK_ALIGN_CENTER);
     gtk_box_pack_start(GTK_BOX(v), lbl, FALSE, FALSE, 0);
 
+    GtkWidget *version_lbl = gtk_label_new("Version V" WBASIC_VERSION_STR);
+    gtk_widget_set_halign(version_lbl, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(v), version_lbl, FALSE, FALSE, 0);
+
+    GtkWidget *date_lbl = gtk_label_new("March 21, 2026");
+    gtk_widget_set_halign(date_lbl, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(v), date_lbl, FALSE, FALSE, 0);
+
     gtk_widget_add_events(dlg, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK);
     g_signal_connect(dlg, "key-press-event", G_CALLBACK(ui_splash_on_key), app);
     g_signal_connect(dlg, "button-press-event", G_CALLBACK(ui_splash_on_button), app);
@@ -13117,7 +14416,7 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buf_changed), app);
     gtk_paned_pack1(GTK_PANED(paned), editor_sw, TRUE, FALSE);
 
-    GtkWidget *output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
+    app->output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
 
     /* Pane "border": add internal padding so text never prints flush to the edge.
        Use the same thickness as the paned separator (~12px). */
@@ -13153,7 +14452,19 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
 
     // Apply saved theme (colors + font) now that views are named
     apply_theme(app);
-    gtk_paned_pack2(GTK_PANED(paned), output_sw, TRUE, FALSE);
+    app->output_stack = gtk_stack_new();
+    gtk_stack_set_transition_type(GTK_STACK(app->output_stack), GTK_STACK_TRANSITION_TYPE_NONE);
+    gtk_stack_add_named(GTK_STACK(app->output_stack), app->output_sw, "text");
+
+    app->gfx_area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(app->gfx_area, TRUE);
+    gtk_widget_set_vexpand(app->gfx_area, TRUE);
+    gtk_widget_set_name(app->gfx_area, "wbasic_gfx");
+    g_signal_connect(app->gfx_area, "draw", G_CALLBACK(on_gfx_area_draw), app);
+    gtk_stack_add_named(GTK_STACK(app->output_stack), app->gfx_area, "gfx");
+
+    ui_update_output_mode(app);
+    gtk_paned_pack2(GTK_PANED(paned), app->output_stack, TRUE, FALSE);
     if (app->have_paned_pos && app->paned_pos > 0) gtk_paned_set_position(GTK_PANED(paned), app->paned_pos);
 
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -13385,6 +14696,10 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     app.screen = NULL;
     app.screen_fg = NULL;
     app.screen_bg = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.cur_fg = 16;
     app.cur_bg = 16;
     app.option_base = 0;
@@ -13409,6 +14724,7 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     free(app.screen);
     free(app.screen_fg);
     free(app.screen_bg);
+    gfx_free(&app);
     return 0;
 }
 
@@ -13455,6 +14771,10 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.screen_rows = 25;
     app.screen_cols = 80;
     app.screen = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.option_base = 0;
     app.option_base_locked = false;
     app.font_name = xstrdup("Monospace 12");
@@ -13496,6 +14816,9 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
         app.scrollback_lines = NULL;
     }
     if (app.screen) free(app.screen);
+    if (app.screen_fg) free(app.screen_fg);
+    if (app.screen_bg) free(app.screen_bg);
+    gfx_free(&app);
     if (app.accel) g_object_unref(app.accel);
     free(app.font_name);
     return 0;
@@ -13758,6 +15081,10 @@ gtk_init(&argc, &argv);
 app.screen_rows = 25;
 app.screen_cols = 80;
 app.screen = NULL;
+    app.video_mode = WB_VIDEO_TEXT;
+    app.gfx_width = 0;
+    app.gfx_height = 0;
+    app.gfx_pixels = NULL;
     app.option_base = 0;  // OPTION BASE default
     app.option_base_locked = false;
     // Default font (can be overridden by prefs_load and Preferences dialog)
@@ -13802,6 +15129,9 @@ app.screen = NULL;
         app.scrollback_lines = NULL;
     }
     if (app.screen) free(app.screen);
+    if (app.screen_fg) free(app.screen_fg);
+    if (app.screen_bg) free(app.screen_bg);
+    gfx_free(&app);
     if (app.accel) g_object_unref(app.accel);
     free(app.font_name);
     return 0;

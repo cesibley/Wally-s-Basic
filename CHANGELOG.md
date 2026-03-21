@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## [V2.0] – March 21, 2026
+
+- Versioned the release as V2.0 across the project documentation and UI.
+  - Updated the README version banner to show V2.0 and the March 21, 2026 release date.
+  - Updated WBASIC internal version metadata used by the application UI.
+
+- Graphics support documented in the README.
+  - Listed the currently implemented graphics commands and supported SCREEN modes.
+  - Documented current graphics limitations and GTK UI requirements.
+
+- About and splash UI updated for the V2.0 release.
+  - About dialog now shows the V2.0 version string and March 21, 2026 date.
+  - Splash screen now shows the V2.0 version string and March 21, 2026 date.
+
 ## [V1.20] – Unified GTK + CLI Runtime.  PRINT USING implemetation with full semantics
 
 - Unified GTK and CLI into a single runtime-selectable binary.
