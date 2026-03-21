@@ -62,7 +62,7 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ```
 
 ## Demos
-See the `demo/` directory for example BASIC programs
+See the `demos/` directory for example BASIC programs, including Mandelbrot, Julia set, Barnsley fern, and sprite examples.
 
 ## License
 MIT License
