@@ -1,7 +1,5 @@
 # Wally's Basic (WBASIC)
 
-This branch has new features not yet fully tested or merged to main branch
-
 WBASIC is a GW-BASIC–style interpreter with a GTK3 user interface, focused on
 faithful classic BASIC behavior and a portable C codebase, including
 text and graphics command support.
