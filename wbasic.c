@@ -907,6 +907,7 @@ static const ScreenModeSpec *screen_mode_spec_find(int mode) {
 typedef struct App {
     bool resume_from_gosub;
     GtkWidget *win;
+    GtkWidget *output_win;
     GtkTextBuffer *editor_buf;
     GtkTextBuffer *output_buf;
     GtkWidget *cmd_entry;
@@ -1012,15 +1013,18 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
     struct timeval start_tv;
 
     // Persisted UI settings
-    GtkWidget *paned;
     bool have_win_size;
     int win_w;
     int win_h;
     bool have_win_pos;
     int win_x;
     int win_y;
-    bool have_paned_pos;
-    int paned_pos;
+    bool have_output_win_size;
+    int output_win_w;
+    int output_win_h;
+    bool have_output_win_pos;
+    int output_win_x;
+    int output_win_y;
     char *font_name; // e.g., "Monospace 12"
 
     // Output speed preference: 0.0 = Slow (slow), 1.0 = Fast (no delay)
@@ -1329,6 +1333,7 @@ static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_dat
 
 /* Title bar / document tracking (forward decls) */
 static void update_window_title(App *app);
+static void ui_ensure_output_window_visible(App *app);
 static void set_current_path(App *app, const char *path_or_null);
 static void mark_dirty(App *app, bool dirty);
 #ifndef WBASIC_NO_UI
@@ -3083,9 +3088,15 @@ static WB_UNUSED void prefs_save(App *app) {
         g_key_file_set_integer(kf, "ui", "win_x", app->win_x);
         g_key_file_set_integer(kf, "ui", "win_y", app->win_y);
     }
-    g_key_file_set_boolean(kf, "ui", "have_paned_pos", app->have_paned_pos);
-    if (app->have_paned_pos) {
-        g_key_file_set_integer(kf, "ui", "paned_pos", app->paned_pos);
+    g_key_file_set_boolean(kf, "ui", "have_output_win_size", app->have_output_win_size);
+    if (app->have_output_win_size) {
+        g_key_file_set_integer(kf, "ui", "output_win_w", app->output_win_w);
+        g_key_file_set_integer(kf, "ui", "output_win_h", app->output_win_h);
+    }
+    g_key_file_set_boolean(kf, "ui", "have_output_win_pos", app->have_output_win_pos);
+    if (app->have_output_win_pos) {
+        g_key_file_set_integer(kf, "ui", "output_win_x", app->output_win_x);
+        g_key_file_set_integer(kf, "ui", "output_win_y", app->output_win_y);
     }
     if (app->font_name && *app->font_name) {
         g_key_file_set_string(kf, "ui", "font", app->font_name);
@@ -3172,9 +3183,15 @@ static WB_UNUSED void prefs_load(App *app) {
         app->win_x = g_key_file_get_integer(kf, "ui", "win_x", NULL);
         app->win_y = g_key_file_get_integer(kf, "ui", "win_y", NULL);
     }
-    app->have_paned_pos = g_key_file_get_boolean(kf, "ui", "have_paned_pos", NULL);
-    if (app->have_paned_pos) {
-        app->paned_pos = g_key_file_get_integer(kf, "ui", "paned_pos", NULL);
+    app->have_output_win_size = g_key_file_get_boolean(kf, "ui", "have_output_win_size", NULL);
+    if (app->have_output_win_size) {
+        app->output_win_w = g_key_file_get_integer(kf, "ui", "output_win_w", NULL);
+        app->output_win_h = g_key_file_get_integer(kf, "ui", "output_win_h", NULL);
+    }
+    app->have_output_win_pos = g_key_file_get_boolean(kf, "ui", "have_output_win_pos", NULL);
+    if (app->have_output_win_pos) {
+        app->output_win_x = g_key_file_get_integer(kf, "ui", "output_win_x", NULL);
+        app->output_win_y = g_key_file_get_integer(kf, "ui", "output_win_y", NULL);
     }
     gchar *font = g_key_file_get_string(kf, "ui", "font", NULL);
     if (font) {
@@ -12429,6 +12446,9 @@ static void run_apply_default_screen0(App *app) {
 }
 
 static void do_run(App *app) {
+#ifndef WBASIC_NO_UI
+    ui_ensure_output_window_visible(app);
+#endif
 
     run_apply_default_screen0(app);
 
@@ -13709,35 +13729,39 @@ gtk_box_pack_start(GTK_BOX(rv), l3, FALSE, FALSE, 0);
 
 #ifndef WBASIC_NO_UI
 static gboolean on_win_configure(GtkWidget *w, GdkEvent *event, gpointer user_data) {
-    (void)w;
-    (void)event;
     App *app = (App*)user_data;
     if (!app) return FALSE;
 
-    // Track window size continuously so we can restore it reliably.
-    // Some window managers may report "maximized" early; we still record the
-    // last known size so it persists across restarts.
-    if (app->win) {
-        int ww = 0, wh = 0;
-        if (event && event->type == GDK_CONFIGURE) {
-            GdkEventConfigure *ce = (GdkEventConfigure*)event;
-            ww = ce->width; wh = ce->height;
+    bool is_output = (w == app->output_win);
+    int ww = 0, wh = 0;
+    if (event && event->type == GDK_CONFIGURE) {
+        GdkEventConfigure *ce = (GdkEventConfigure*)event;
+        ww = ce->width;
+        wh = ce->height;
+    } else if (w) {
+        gtk_window_get_size(GTK_WINDOW(w), &ww, &wh);
+    }
+    if (ww > 0 && wh > 0) {
+        if (is_output) {
+            app->have_output_win_size = true;
+            app->output_win_w = ww;
+            app->output_win_h = wh;
         } else {
-            gtk_window_get_size(GTK_WINDOW(w), &ww, &wh);
-        }
-        if (ww > 0 && wh > 0) {
             app->have_win_size = true;
             app->win_w = ww;
             app->win_h = wh;
         }
-        // Track window position as well (x/y in root window coordinates).
-        // We only update when GTK provides configure-event coordinates.
-        if (event && event->type == GDK_CONFIGURE) {
-            GdkEventConfigure *ce2 = (GdkEventConfigure*)event;
-            int wx = ce2->x;
-            int wy = ce2->y;
-            // Some WMs may report extreme negative values when minimized; ignore those.
-            if (wx > -10000 && wx < 100000 && wy > -10000 && wy < 100000) {
+    }
+    if (event && event->type == GDK_CONFIGURE) {
+        GdkEventConfigure *ce = (GdkEventConfigure*)event;
+        int wx = ce->x;
+        int wy = ce->y;
+        if (wx > -10000 && wx < 100000 && wy > -10000 && wy < 100000) {
+            if (is_output) {
+                app->have_output_win_pos = true;
+                app->output_win_x = wx;
+                app->output_win_y = wy;
+            } else {
                 app->have_win_pos = true;
                 app->win_x = wx;
                 app->win_y = wy;
@@ -13753,31 +13777,48 @@ static gboolean on_win_configure(GtkWidget *w, GdkEvent *event, gpointer user_da
 
 #ifndef WBASIC_NO_UI
 static void on_win_size_allocate(GtkWidget *w, GtkAllocation *alloc, gpointer user_data) {
-    (void)w;
     App *app = (App*)user_data;
     if (!app || !alloc) return;
 
-    // Fires reliably; use it to persist last known window size.
     if (alloc->width > 0 && alloc->height > 0) {
-        app->have_win_size = true;
-        app->win_w = alloc->width;
-        app->win_h = alloc->height;
+        if (w == app->output_win) {
+            app->have_output_win_size = true;
+            app->output_win_w = alloc->width;
+            app->output_win_h = alloc->height;
+        } else {
+            app->have_win_size = true;
+            app->win_w = alloc->width;
+            app->win_h = alloc->height;
+        }
     }
 }
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
 static gboolean on_win_delete(GtkWidget *w, GdkEvent *event, gpointer user_data) {
-    (void)w;
     (void)event;
     App *app = (App*)user_data;
     if (!app) return FALSE;
+
+    if (w == app->output_win) {
+        if (app->run_state == RUN_RUNNING || app->run_state == RUN_WAITING || app->run_state == RUN_PAUSED) {
+            do_stop(app);
+        }
+        prefs_save(app);
+        gtk_widget_hide(w);
+        return TRUE;
+    }
+
+    if (app->quitting) return FALSE;
     if (!ui_confirm_save_if_dirty(app)) {
         return TRUE; /* cancel close */
     }
     app->quitting = true;
     app->stop_flag = true;
-    if (app->paned) { app->have_paned_pos = true; app->paned_pos = gtk_paned_get_position(GTK_PANED(app->paned)); }
+    if (app->output_win && GTK_IS_WIDGET(app->output_win)) {
+        gtk_widget_destroy(app->output_win);
+        app->output_win = NULL;
+    }
     prefs_save(app);
     return FALSE; /* allow close */
 }
@@ -13786,26 +13827,23 @@ static gboolean on_win_delete(GtkWidget *w, GdkEvent *event, gpointer user_data)
 
 #ifndef WBASIC_NO_UI
 static void on_win_destroy(GtkWidget *w, gpointer user_data) {
-    (void)w;
     App *app = (App*)user_data;
-    if (app) {
-        /* Ensure interpreter loops stop touching GTK after teardown begins. */
-        app->quitting = true;
-        app->stop_flag = true;
-        app->ui_destroyed = true;
-        /* Null out widget pointers so any late-running code can safely bail. */
-        app->win = NULL;
-        app->cmd_entry = NULL;
-        app->editor_view = NULL;
-        app->output_view = NULL;
-        app->status_led = NULL;
-        app->status_label = NULL;
+    if (!app) return;
+
+    if (w == app->output_win) {
+        app->output_win = NULL;
+        return;
     }
-    // Save prefs on final teardown (window size already tracked during runtime).
-    if (app && app->paned) {
-        app->have_paned_pos = true;
-        app->paned_pos = gtk_paned_get_position(GTK_PANED(app->paned));
-    }
+
+    app->quitting = true;
+    app->stop_flag = true;
+    app->ui_destroyed = true;
+    app->win = NULL;
+    app->cmd_entry = NULL;
+    app->editor_view = NULL;
+    app->output_view = NULL;
+    app->status_led = NULL;
+    app->status_label = NULL;
 
     prefs_save(app);
     gtk_main_quit();
@@ -14206,10 +14244,10 @@ static GtkWidget *make_scrolled_editor_view(GtkTextBuffer **out_buf, GtkWidget *
 #ifndef WBASIC_NO_UI
 static gboolean on_cmd_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data);
 static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data);
-
+static void ui_ensure_output_window_visible(App *app);
 static void update_window_title(App *app)
 {
-    if (!app || !app->win) return;
+    if (!app) return;
 
     const char *disp = "Untitled";
     gchar *base = NULL;
@@ -14219,10 +14257,23 @@ static void update_window_title(App *app)
         if (base && *base) disp = base;
     }
 
-    gchar *title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
-    gtk_window_set_title(GTK_WINDOW(app->win), title);
-    g_free(title);
+    gchar *editor_title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
+    if (app->win) gtk_window_set_title(GTK_WINDOW(app->win), editor_title);
+    g_free(editor_title);
+
+    if (app->output_win) {
+        gchar *output_title = g_strdup_printf("Output: %s - Wally's Basic", disp);
+        gtk_window_set_title(GTK_WINDOW(app->output_win), output_title);
+        g_free(output_title);
+    }
     if (base) g_free(base);
+}
+
+static void ui_ensure_output_window_visible(App *app)
+{
+    if (!app || !app->output_win || app->ui_destroyed) return;
+    if (!gtk_widget_get_visible(app->output_win)) gtk_widget_show_all(app->output_win);
+    update_window_title(app);
 }
 #endif /* !WBASIC_NO_UI */
 #endif /* !WBASIC_NO_UI */
@@ -14367,10 +14418,13 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
 static void build_ui(App *app) {
     app->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     attach_windows_dark_titlebar(app->win);
-    // Window title is driven by current filename
     update_window_title(app);
 
-    // Keyboard accelerators
+    app->output_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    attach_windows_dark_titlebar(app->output_win);
+    gtk_window_set_title(GTK_WINDOW(app->output_win), "Program Output - Wally's Basic");
+    gtk_window_set_transient_for(GTK_WINDOW(app->output_win), GTK_WINDOW(app->win));
+
     app->accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(app->win), app->accel);
     if (app->have_win_size && app->win_w > 0 && app->win_h > 0) {
@@ -14378,48 +14432,33 @@ static void build_ui(App *app) {
     } else {
         gtk_window_set_default_size(GTK_WINDOW(app->win), 980, 720);
     }
+    if (app->have_output_win_size && app->output_win_w > 0 && app->output_win_h > 0) {
+        gtk_window_set_default_size(GTK_WINDOW(app->output_win), app->output_win_w, app->output_win_h);
+    } else {
+        gtk_window_set_default_size(GTK_WINDOW(app->output_win), 760, 420);
+    }
 
-    // Restore window position (best-effort). Must be done before the window is shown.
     if (app->have_win_pos) {
         gtk_window_move(GTK_WINDOW(app->win), app->win_x, app->win_y);
     }
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_container_add(GTK_CONTAINER(app->win), vbox);
-
-    gtk_box_pack_start(GTK_BOX(vbox), make_menu_bar(app), FALSE, FALSE, 0);
-
-    app->paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
-    GtkWidget *paned = app->paned;
-
-    /* Experiment: make editor/output divider wider */
-    gtk_paned_set_wide_handle(GTK_PANED(paned), TRUE);
-    
-
-    /* Make paned handle ~50% thicker */
-    {
-        GtkCssProvider *prov = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(prov,
-            "paned > separator { min-width: 12px; min-height: 12px; }",
-            -1, NULL);
-        gtk_style_context_add_provider_for_screen(
-            gdk_screen_get_default(),
-            GTK_STYLE_PROVIDER(prov),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(prov);
+    if (app->have_output_win_pos) {
+        gtk_window_move(GTK_WINDOW(app->output_win), app->output_win_x, app->output_win_y);
+    } else if (app->have_win_pos) {
+        gtk_window_move(GTK_WINDOW(app->output_win), app->win_x + 80, app->win_y + 80);
     }
-gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
+
+    GtkWidget *editor_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(app->win), editor_vbox);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), make_menu_bar(app), FALSE, FALSE, 0);
 
     GtkWidget *editor_sw = make_scrolled_editor_view(&app->editor_buf, &app->editor_view);
-    // Plain GtkTextView editor: provide WBASIC undo/redo via lightweight snapshot stack.
     app->editor_undo = undo_stack_new_for_buffer(app->editor_buf);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buffer_changed), app);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buf_changed), app);
-    gtk_paned_pack1(GTK_PANED(paned), editor_sw, TRUE, FALSE);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), editor_sw, TRUE, TRUE, 0);
 
     app->output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
 
-    /* Pane "border": add internal padding so text never prints flush to the edge.
-       Use the same thickness as the paned separator (~12px). */
     gtk_text_view_set_left_margin(GTK_TEXT_VIEW(app->editor_view), 12);
     gtk_text_view_set_right_margin(GTK_TEXT_VIEW(app->editor_view), 12);
     gtk_text_view_set_top_margin(GTK_TEXT_VIEW(app->editor_view), 12);
@@ -14429,8 +14468,7 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     gtk_text_view_set_right_margin(GTK_TEXT_VIEW(app->output_view), 12);
     gtk_text_view_set_top_margin(GTK_TEXT_VIEW(app->output_view), 12);
     gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(app->output_view), 12);
-    /* Initialize optimized output scrollback (GTK).
-       We keep transcript scrollback lines above a stable mark, and re-render the current screen below it. */
+
     app->out_scrollback_lines = 0;
     app->out_scrollback_max_lines = 1000;
     if (app->output_buf) {
@@ -14438,20 +14476,21 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
         gtk_text_buffer_get_start_iter(app->output_buf, &it0);
         GtkTextMark *m = gtk_text_buffer_get_mark(app->output_buf, "out_screen_start");
         if (!m) {
-            m = gtk_text_buffer_create_mark(app->output_buf, "out_screen_start", &it0, TRUE /* left gravity: keep screen boundary */);
+            m = gtk_text_buffer_create_mark(app->output_buf, "out_screen_start", &it0, TRUE);
         } else {
             gtk_text_buffer_move_mark(app->output_buf, m, &it0);
         }
         app->out_screen_start_mark = m;
     }
 
-
-    // Names used by CSS theming
     if (app->editor_view) gtk_widget_set_name(app->editor_view, "wbasic_editor");
     if (app->output_view) gtk_widget_set_name(app->output_view, "wbasic_output");
 
-    // Apply saved theme (colors + font) now that views are named
     apply_theme(app);
+
+    GtkWidget *output_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(app->output_win), output_vbox);
+
     app->output_stack = gtk_stack_new();
     gtk_stack_set_transition_type(GTK_STACK(app->output_stack), GTK_STACK_TRANSITION_TYPE_NONE);
     gtk_stack_add_named(GTK_STACK(app->output_stack), app->output_sw, "text");
@@ -14464,21 +14503,19 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     gtk_stack_add_named(GTK_STACK(app->output_stack), app->gfx_area, "gfx");
 
     ui_update_output_mode(app);
-    gtk_paned_pack2(GTK_PANED(paned), app->output_stack, TRUE, FALSE);
-    if (app->have_paned_pos && app->paned_pos > 0) gtk_paned_set_position(GTK_PANED(paned), app->paned_pos);
+    gtk_box_pack_start(GTK_BOX(output_vbox), app->output_stack, TRUE, TRUE, 0);
 
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 8);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), hbox, FALSE, FALSE, 8);
     gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new("Command:"), FALSE, FALSE, 8);
     app->cmd_entry = gtk_entry_new();
     gtk_box_pack_start(GTK_BOX(hbox), app->cmd_entry, TRUE, TRUE, 8);
 
-    // Status indicator (text + LED) in lower-right corner
     GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_set_halign(status_box, GTK_ALIGN_END);
 
     app->status_label = gtk_label_new("Idle");
-    gtk_label_set_xalign(GTK_LABEL(app->status_label), 1.0); // right-justify text within label
+    gtk_label_set_xalign(GTK_LABEL(app->status_label), 1.0);
     gtk_widget_set_halign(app->status_label, GTK_ALIGN_END);
 
     app->status_led = gtk_drawing_area_new();
@@ -14488,7 +14525,6 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
 
     app->run_state = RUN_IDLE;
 
-    // Pack label to the left, LED to the far right (corner)
     gtk_box_pack_start(GTK_BOX(status_box), app->status_label, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(status_box), app->status_led, FALSE, FALSE, 0);
 
@@ -14499,7 +14535,6 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->cmd_entry, "focus-in-event", G_CALLBACK(on_cmd_focus_in), app);
     g_signal_connect(app->cmd_entry, "focus-out-event", G_CALLBACK(on_cmd_focus_out), app);
 
-    // Start with no BASIC program in memory
     editor_set_text(app->editor_buf, "");
 
     g_signal_connect(app->win, "delete-event", G_CALLBACK(on_win_delete), app);
@@ -14507,17 +14542,15 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->win, "size-allocate", G_CALLBACK(on_win_size_allocate), app);
     g_signal_connect(app->win, "configure-event", G_CALLBACK(on_win_configure), app);
     g_signal_connect(app->win, "destroy", G_CALLBACK(on_win_destroy), app);
+
+    g_signal_connect(app->output_win, "delete-event", G_CALLBACK(on_win_delete), app);
+    g_signal_connect(app->output_win, "key-press-event", G_CALLBACK(on_win_key_press), app);
+    g_signal_connect(app->output_win, "size-allocate", G_CALLBACK(on_win_size_allocate), app);
+    g_signal_connect(app->output_win, "configure-event", G_CALLBACK(on_win_configure), app);
+    g_signal_connect(app->output_win, "destroy", G_CALLBACK(on_win_destroy), app);
 }
-#endif /* !WBASIC_NO_UI */
 
 
-
-/* ===================== TRUE Option C export support ===================== */
-
-static void free_key(gpointer data);
-static void free_val(gpointer data);
-
-#ifndef WBASIC_NO_UI
 static WB_UNUSED char *get_editor_text_dup(App *app) {
     if (!app || !app->editor_buf) return NULL;
     GtkTextIter a, b;
@@ -14528,6 +14561,9 @@ static WB_UNUSED char *get_editor_text_dup(App *app) {
 #else
 static WB_UNUSED char *get_editor_text_dup(App *app) { (void)app; return NULL; }
 #endif /* WBASIC_NO_UI */
+
+static void free_key(gpointer data);
+static void free_val(gpointer data);
 
 /* deleted unused static function: c_emit_escaped */
 
@@ -14790,6 +14826,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
 
     build_ui(&app);
     gtk_widget_show_all(app.win);
+    gtk_widget_show_all(app.output_win);
 
     if (app.show_splash) {
         g_idle_add(ui_splash_show_idle, &app);
@@ -15104,6 +15141,7 @@ app.screen = NULL;
 
     build_ui(&app);
     gtk_widget_show_all(app.win);
+    gtk_widget_show_all(app.output_win);
 
     /* Splash: show after GTK main loop starts. If enabled, defer startup load/autorun until splash dismiss. */
     if (app.show_splash) {
