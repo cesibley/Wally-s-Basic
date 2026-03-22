@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Documented the latest standalone exported graphics behavior in the project docs.
+  - README now explains that exported programs auto-select headless or GTK runtime based on whether the BASIC source uses graphics `SCREEN` modes.
+  - README now clarifies that graphics-capable exports launch directly into the output window and use the exported program name for the GTK window title.
+
 - Documented the latest experimental UI refresh in the project docs.
   - README now starts with an experimental-version notice clarifying that the UI changes are not yet merged into the main codebase.
   - README now notes that the GTK UI uses separate editor and output windows.

@@ -35,13 +35,14 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
   - `CLS` clears graphics screens, and `COLOR` supplies the current drawing color used by commands that omit an explicit color
 
 ## Limitations and differences
-- Graphics are available only in the GTK UI build; CLI/headless mode reports graphics as unavailable
+- Graphics are available in the GTK UI build, and exported standalone programs now automatically use the GTK runtime when the source uses graphics `SCREEN` modes; CLI/headless runtime mode still reports graphics as unavailable
 - `SCREEN` accepts the common optional arguments for compatibility, but currently ignores `colorburst`, `apage`, and `vpage`
 - `LINE` parses style arguments for compatibility, but patterned line styles are not yet applied
 - `CIRCLE` currently supports center, radius, and optional color; aspect, start/end angles, and other extended GW-BASIC options are not yet implemented
 - `PAINT` implements fill color and optional border color
 - `GET`/`PUT` use numeric BASIC arrays as a simple width/height + pixel buffer format
-- Files may be "exported" to a Linux executable.  Run speeds increased by ~10x
+- Files may be exported to a Linux executable. Text-only exports build as headless standalones, while programs that use graphics `SCREEN` modes automatically export as GTK standalones so graphics programs can run after export
+- Exported graphics standalones open the program output window directly and use the exported program name as the GTK window title
 - SPEED directive added to slow down screen prints to throttle older programs
 
 ## Building
