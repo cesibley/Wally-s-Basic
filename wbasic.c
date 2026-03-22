@@ -14826,7 +14826,6 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
 
     build_ui(&app);
     gtk_widget_show_all(app.win);
-    gtk_widget_show_all(app.output_win);
 
     if (app.show_splash) {
         g_idle_add(ui_splash_show_idle, &app);
@@ -15141,7 +15140,6 @@ app.screen = NULL;
 
     build_ui(&app);
     gtk_widget_show_all(app.win);
-    gtk_widget_show_all(app.output_win);
 
     /* Splash: show after GTK main loop starts. If enabled, defer startup load/autorun until splash dismiss. */
     if (app.show_splash) {

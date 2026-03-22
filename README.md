@@ -63,7 +63,7 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ./wbasic
 ```
 
-The current experimental UI opens the program editor and program output in separate GTK windows. The output window is shown automatically at startup and is brought forward when a program is run. Window size and position are persisted independently for the editor and output windows.
+The current experimental UI opens the program editor and program output in separate GTK windows. The output window stays hidden at startup and is shown when a program is run. Window size and position are persisted independently for the editor and output windows.
 
 ## Demos
 See the `demos/` directory for example BASIC programs, including Mandelbrot, Julia set, Barnsley fern, and sprite examples.
