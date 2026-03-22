@@ -931,6 +931,9 @@ typedef struct App {
     RunState run_state;
     bool inkey_ready;
     char inkey_char;
+    bool inkey_waiting;
+    int inkey_wait_grace_statements;
+    bool statement_uses_inkey;
 
     /* Headless (CLI) terminal I/O state. Present in unified builds too. */
     int headless_tty_fd;
@@ -5225,11 +5228,14 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
+            app->statement_uses_inkey = true;
             if (!wbasic_ui_active(app)) headless_try_read_inkey(app);
             if (app->inkey_ready) {
                 char buf[2] = { app->inkey_char, 0 };
                 *out = xstrdup(buf);
                 app->inkey_ready = false;
+                app->inkey_waiting = false;
+                app->inkey_wait_grace_statements = 0;
 
                 // Key received during polling: show RUNNING again
                 if (app->run_state == RUN_WAITING) set_run_state(app, RUN_RUNNING);
@@ -5237,8 +5243,11 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
             } else {
                 *out = xstrdup("");
 
-                // INKEY$ is non-blocking. Keep status as RUNNING while polling.
-                // RUN_WAITING is reserved for truly blocking waits (e.g., INPUT dialogs).
+                // Tight INKEY$ polling loops should briefly surface WAITING so the
+                // status LED shows the historical amber "waiting for key" state.
+                app->inkey_waiting = true;
+                app->inkey_wait_grace_statements = 1;
+                if (app->run_state == RUN_RUNNING) set_run_state(app, RUN_WAITING);
                 return true;
             }
         }
@@ -6950,6 +6959,7 @@ static bool exec_print_file(App *app, Parser *p, int current_line);
 static bool exec_write(App *app, Parser *p, int current_line);
 static bool exec_write_file(App *app, Parser *p, int current_line);
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode);
+static void finish_inkey_wait_after_statement(App *app);
 static bool exec_statement_chain_from(App *app, const char *text, int current_line,
                                      int base_line_idx, int base_stmt_idx,
                                      int start_si,
@@ -6983,6 +6993,7 @@ app->exec_stmt_idx = i; /* chain-local statement index */
 app->exec_line_no = current_line;
 
 if (!exec_single_statement(app, sl.stmts[i], current_line, base_line_idx, i, line_idx, stmt_idx)) {
+            finish_inkey_wait_after_statement(app);
             app->chain_active = prev_chain_active;
             app->chain_base_line_idx = prev_chain_base_li;
             app->chain_base_stmt_idx = prev_chain_base_si;
@@ -6990,6 +7001,8 @@ if (!exec_single_statement(app, sl.stmts[i], current_line, base_line_idx, i, lin
             stmtlist_free(&sl);
             return false;
         }
+
+        finish_inkey_wait_after_statement(app);
 
         // If statement changed flow (GOTO/GOSUB/etc), stop chaining here.
         if (*line_idx != li_before || *stmt_idx != si_before) {
@@ -10418,6 +10431,8 @@ static bool exec_mid_assign(App *app, Parser *p, int current_line) {
 /* ===================== Execute a single statement ===================== */
 
 static bool exec_single_statement(App *app, const char *stmt, int current_line, int cur_li, int cur_si, int *line_idx, int *stmt_idx) {
+    app->statement_uses_inkey = false;
+
     // If we just RETURNed from a GOSUB that occurred inside a ':' chain (usually inside an IF tail),
     // resume execution inside that chain instead of re-running the owning statement from the top.
     if (app->resume_chain_pending &&
@@ -12201,6 +12216,9 @@ static void runtime_reset(App *app) {
     app->on_key_in_progress = false;
 
     app->inkey_ready = false;
+    app->inkey_waiting = false;
+    app->inkey_wait_grace_statements = 0;
+    app->statement_uses_inkey = false;
     app->stop_flag = false;
         app->pause_flag = false;
     app->option_base = 0;
@@ -12247,6 +12265,19 @@ static void runtime_reset(App *app) {
 }
 
 static void maybe_do_pending_load(App *app);
+
+static void finish_inkey_wait_after_statement(App *app) {
+    if (!app || app->input_waiting) return;
+    if (app->run_state != RUN_WAITING || !app->inkey_waiting) return;
+    if (app->statement_uses_inkey) return;
+    if (app->inkey_wait_grace_statements > 0) {
+        app->inkey_wait_grace_statements--;
+        return;
+    }
+    app->inkey_waiting = false;
+    app->inkey_wait_grace_statements = 0;
+    set_run_state(app, RUN_RUNNING);
+}
 
 static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool clear_output, bool reset_vars) {
     if (clear_output) {
@@ -12406,6 +12437,8 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
 
         stmtlist_free(&sl);
 
+        finish_inkey_wait_after_statement(app);
+
         // Interpreter-wide speed control (not just output pacing)
         exec_apply_pacing(app);
 
@@ -12422,7 +12455,9 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
         // certain error/stop paths. Ensure we leave RUNNING when a program terminates.
         // If an error/STOP already set RUN_STOPPED, keep it.
         if (!cont) {
-            if (app->run_state == RUN_RUNNING) set_run_state(app, RUN_IDLE);
+            if (app->run_state == RUN_RUNNING || (app->run_state == RUN_WAITING && !app->input_waiting)) {
+                set_run_state(app, RUN_IDLE);
+            }
     maybe_do_pending_load(app);
             return;
         }
@@ -13243,6 +13278,7 @@ static void do_immediate(App *app, const char *cmdline) {
         int nsi = si + 1;
 
         bool cont = exec_single_statement(app, sl.stmts[si], -1, -1, -1, &nli, &nsi);
+        finish_inkey_wait_after_statement(app);
         if (!cont) break;
 
         if (nli != 0) {
