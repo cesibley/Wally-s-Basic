@@ -1036,6 +1036,7 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
 double print_throttle_carry_ms;
     bool export_include_speed; // if true, embed output speed into exported headless builds
     bool show_splash;          // if true, show startup splash dialog (GUI only)
+    bool embedded_ui_export;   // true for exported embedded programs using the GTK runtime
     GtkWidget *splash_dlg;     // active splash dialog (or NULL)
     char *deferred_startup_file; // if set, load this file after splash dismiss
     bool deferred_autorun;       // if true, run after splash dismiss (after optional load)
@@ -13837,6 +13838,16 @@ static gboolean on_win_delete(GtkWidget *w, GdkEvent *event, gpointer user_data)
     if (!app) return FALSE;
 
     if (w == app->output_win) {
+        if (app->embedded_ui_export) {
+            app->quitting = true;
+            app->stop_flag = true;
+            prefs_save(app);
+            if (app->win && GTK_IS_WIDGET(app->win)) {
+                gtk_widget_destroy(app->win);
+                app->win = NULL;
+            }
+            return FALSE;
+        }
         if (app->run_state == RUN_RUNNING || app->run_state == RUN_WAITING || app->run_state == RUN_PAUSED) {
             do_stop(app);
         }
@@ -14287,21 +14298,42 @@ static void update_window_title(App *app)
 
     const char *disp = "Untitled";
     gchar *base = NULL;
+    gchar *embedded_title = NULL;
 
     if (app->current_path && *app->current_path) {
         base = g_path_get_basename(app->current_path);
         if (base && *base) disp = base;
     }
 
-    gchar *editor_title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
+    if (app->embedded_ui_export && disp && *disp) {
+        embedded_title = g_strdup(disp);
+        if (embedded_title) {
+            char *dot = strrchr(embedded_title, '.');
+            if (dot && dot != embedded_title) *dot = '\0';
+            if (*embedded_title) disp = embedded_title;
+        }
+    }
+
+    gchar *editor_title = NULL;
+    if (app->embedded_ui_export) {
+        editor_title = g_strdup(disp);
+    } else {
+        editor_title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
+    }
     if (app->win) gtk_window_set_title(GTK_WINDOW(app->win), editor_title);
     g_free(editor_title);
 
     if (app->output_win) {
-        gchar *output_title = g_strdup_printf("Output: %s - Wally's Basic", disp);
+        gchar *output_title = NULL;
+        if (app->embedded_ui_export) {
+            output_title = g_strdup(disp);
+        } else {
+            output_title = g_strdup_printf("Output: %s - Wally's Basic", disp);
+        }
         gtk_window_set_title(GTK_WINDOW(app->output_win), output_title);
         g_free(output_title);
     }
+    if (embedded_title) g_free(embedded_title);
     if (base) g_free(base);
 }
 
@@ -14458,7 +14490,11 @@ static void build_ui(App *app) {
 
     app->output_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     attach_windows_dark_titlebar(app->output_win);
-    gtk_window_set_title(GTK_WINDOW(app->output_win), "Program Output - Wally's Basic");
+    if (app->embedded_ui_export) {
+        update_window_title(app);
+    } else {
+        gtk_window_set_title(GTK_WINDOW(app->output_win), "Program Output - Wally's Basic");
+    }
     gtk_window_set_transient_for(GTK_WINDOW(app->output_win), GTK_WINDOW(app->win));
 
     app->accel = gtk_accel_group_new();
@@ -14617,9 +14653,83 @@ static void c_emit_escaped_len(FILE *fp, const char *s, size_t n) {
     }
 }
 
+typedef enum ExportRuntimeKind {
+    EXPORT_RUNTIME_HEADLESS = 0,
+    EXPORT_RUNTIME_GTK = 1
+} ExportRuntimeKind;
+
+static bool export_scan_match_word_ci(const char *s, const char *word) {
+    if (!s || !word) return false;
+    size_t n = strlen(word);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char a = (unsigned char)s[i];
+        unsigned char b = (unsigned char)word[i];
+        if (!a || toupper(a) != toupper(b)) return false;
+    }
+    return true;
+}
+
+static ExportRuntimeKind classify_export_runtime(const char *bas_text) {
+    if (!bas_text) return EXPORT_RUNTIME_HEADLESS;
+
+    const char *p = bas_text;
+    while (*p) {
+        unsigned char ch = (unsigned char)*p;
+
+        if (ch == '"') {
+            p++;
+            while (*p) {
+                if (*p == '"') {
+                    p++;
+                    break;
+                }
+                p++;
+            }
+            continue;
+        }
+
+        if (ch == '\'') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+
+        if (isalpha(ch)) {
+            if (export_scan_match_word_ci(p, "REM") &&
+                !isalnum((unsigned char)p[3]) && p[3] != '$' && p[3] != '_') {
+                while (*p && *p != '\n') p++;
+                continue;
+            }
+
+            if (export_scan_match_word_ci(p, "SCREEN") &&
+                !isalnum((unsigned char)p[6]) && p[6] != '$' && p[6] != '_') {
+                const char *q = p + 6;
+                while (*q == ' ' || *q == '\t') q++;
+
+                if (*q == '\0' || *q == '\n') return EXPORT_RUNTIME_GTK;
+
+                char *endptr = NULL;
+                double mode = strtod(q, &endptr);
+                if (endptr == q) return EXPORT_RUNTIME_GTK;
+                if (mode != 0.0) return EXPORT_RUNTIME_GTK;
+                p = endptr;
+                continue;
+            }
+
+            while (isalnum((unsigned char)*p) || *p == '$' || *p == '_') p++;
+            continue;
+        }
+
+        p++;
+    }
+
+    return EXPORT_RUNTIME_HEADLESS;
+}
+
 static WB_UNUSED int export_standalone_from_text(const char *bas_text, const char *out_exe, int embed_speed_0_100, bool embed_include_speed, char **out_buildlog) {
     if (out_buildlog) *out_buildlog = NULL;
     if (!bas_text || !out_exe) return 1;
+
+    ExportRuntimeKind runtime_kind = classify_export_runtime(bas_text);
 
     char stub_path[4096];
     snprintf(stub_path, sizeof(stub_path), "%s_export.c", out_exe);
@@ -14627,9 +14737,13 @@ static WB_UNUSED int export_standalone_from_text(const char *bas_text, const cha
     FILE *fp = fopen(stub_path, "wb");
     if (!fp) return 1;
 
-    /* Exported program runs headless by default (no window). */
+    /* Exported program defaults to headless unless source scanning finds graphics SCREEN usage. */
     fprintf(fp, "#define WBASIC_EMBEDDED_BUILD 1\n");
-    fprintf(fp, "#define WBASIC_NO_UI 1\n");
+    if (runtime_kind == EXPORT_RUNTIME_HEADLESS) {
+        fprintf(fp, "#define WBASIC_NO_UI 1\n");
+    } else {
+        fprintf(fp, "#define WBASIC_FORCE_UI 1\n");
+    }
 
     if (embed_include_speed) {
         if (embed_speed_0_100 < 0) embed_speed_0_100 = 0;
@@ -14822,6 +14936,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.key_trap_enabled = true;
     app.on_key_pending = -1;
     app.on_key_in_progress = false;
+    app.embedded_ui_export = true;
     app.current_path = NULL;
     app.dirty = false;
     app.suppress_dirty = false;
@@ -14857,25 +14972,21 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.have_last_rnd = false;
     prefs_load(&app);
     recent_load(&app);
+    app.show_splash = false;
+    if (argc > 0 && argv && argv[0] && *argv[0]) set_current_path(&app, argv[0]);
     program_init(&app.prog);
     app.vars = g_hash_table_new_full(g_str_hash, g_str_equal, free_key, free_val);
 
     build_ui(&app);
-    gtk_widget_show_all(app.win);
-
-    if (app.show_splash) {
-        g_idle_add(ui_splash_show_idle, &app);
-    }
 
     app.suppress_dirty = true;
     editor_set_text(app.editor_buf, source_text ? source_text : "");
     app.suppress_dirty = false;
 
-    if (app.show_splash) {
-        app.deferred_autorun = true;
-    } else {
-        do_run(&app);
-    }
+    if (app.win) gtk_widget_hide(app.win);
+    if (app.output_win) gtk_widget_show_all(app.output_win);
+    update_window_title(&app);
+    do_run(&app);
  gtk_main();
 
     runtime_reset(&app);
