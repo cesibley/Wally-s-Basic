@@ -1,5 +1,7 @@
 # Wally's Basic (WBASIC)
 
+> **Experimental branch:** this version includes UI changes that have not yet been incorporated into the main codebase.
+
 WBASIC is a GW-BASIC–style interpreter with a GTK3 user interface, focused on
 faithful classic BASIC behavior and a portable C codebase, including
 text and graphics command support.
@@ -19,7 +21,7 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
   - DATA / READ / RESTORE
   - CLEAR, STOP, END, SYSTEM
   - Etc.
-- GTK3 graphical interface
+- GTK3 graphical interface with a separate editor window and program output window in the latest experimental UI
 - Headless (no-UI) build option
 - Graphics commands currently implemented in `wbasic.c`
   - `SCREEN` modes `0, 1, 2, 3, 7, 8, 9, 10, 11, 12, 13`
@@ -60,6 +62,8 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ```sh
 ./wbasic
 ```
+
+The current experimental UI opens the program editor and program output in separate GTK windows. The output window is shown automatically at startup and is brought forward when a program is run. Window size and position are persisted independently for the editor and output windows.
 
 ## Demos
 See the `demos/` directory for example BASIC programs, including Mandelbrot, Julia set, Barnsley fern, and sprite examples.

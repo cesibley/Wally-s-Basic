@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## [Unreleased]
+
+- Documented the latest experimental UI refresh in the project docs.
+  - README now starts with an experimental-version notice clarifying that the UI changes are not yet merged into the main codebase.
+  - README now notes that the GTK UI uses separate editor and output windows.
+  - README now documents that the output window is shown automatically and that editor/output window geometry is persisted independently.
+
 ## [V2.0] – March 21, 2026
 
 - Versioned the release as V2.0 across the project documentation and UI.
