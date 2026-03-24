@@ -11946,6 +11946,68 @@ return true;
             free(tmp);
             return true; /* no ELSE target */
         } else {
+            /* THEN label shorthand:
+               IF X THEN LABEL
+               IF X THEN LABEL ELSE OTHER
+               QBASIC accepts this as a branch target form. Support both
+               numeric and symbolic label targets without requiring GOTO. */
+            Parser p3 = { p.s };
+            char *then_label = NULL;
+            if (parse_identifier(&p3, &then_label)) {
+                skip_ws(&p3);
+                if (*p3.s == 0 || (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4]))) {
+                    if (cond) {
+                        int idx = program_find_label_index(&app->prog, then_label);
+                        free(then_label);
+                        if (idx < 0) { runtime_error(app, current_line, "THEN target not found"); free(tmp); return false; }
+                        *line_idx = idx;
+                        *stmt_idx = 0;
+                        free(tmp);
+                        return true;
+                    }
+
+                    /* cond is false: optional ELSE <line#|label> */
+                    if (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4])) {
+                        p3.s += 4;
+                        skip_ws(&p3);
+
+                        Parser p4 = { p3.s };
+                        double ln2 = 0.0;
+                        if (parse_number(&p4, &ln2)) {
+                            int target = (int)llround(ln2);
+                            int idx = program_find_index(&app->prog, target);
+                            free(then_label);
+                            if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
+                            *line_idx = idx;
+                            *stmt_idx = 0;
+                            free(tmp);
+                            return true;
+                        }
+
+                        char *else_label = NULL;
+                        if (parse_identifier(&p4, &else_label)) {
+                            skip_ws(&p4);
+                            if (*p4.s == 0) {
+                                int idx = program_find_label_index(&app->prog, else_label);
+                                free(else_label);
+                                free(then_label);
+                                if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
+                                *line_idx = idx;
+                                *stmt_idx = 0;
+                                free(tmp);
+                                return true;
+                            }
+                            free(else_label);
+                        }
+                    }
+
+                    free(then_label);
+                    free(tmp);
+                    return true; /* false condition with no matching ELSE target */
+                }
+            }
+            free(then_label);
+
             // execute the rest as a statement (supports single-line ELSE)
             char *rest = xstrdup(p.s);
             char *rt = trim(rest);
