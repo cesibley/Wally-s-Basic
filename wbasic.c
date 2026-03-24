@@ -2920,10 +2920,6 @@ static void out_printf(App *app, const char *fmt, ...) {
 static void out_clear(App *app, bool terminal_clear) {
     if (!app) return;
 
-    // Reset to Preferences exact colors at each CLS/OUT_CLEAR.
-    app->cur_fg = 16;
-    app->cur_bg = 16;
-
     /* CLI mode: do not touch GTK buffers/widgets. */
     if (!wbasic_ui_active(app)) {
         if (headless_stdout_is_tty()) {
@@ -6234,6 +6230,25 @@ static void strip_inline_rem_comment(char *s) {
     }
 }
 
+static bool is_reserved_basic_keyword_ci(const char *id, size_t len) {
+    if (!id || len == 0) return false;
+    static const char *const kws[] = {
+        "AND","AS","BEEP","CHAIN","CHDIR","CHDRIVE","CLEAR","CLOSE","CLS","COLOR","CONT",
+        "DATA","DEF","DEFDBL","DEFINT","DEFSNG","DEFSTR","DELETE","DIM","DO","DRAW","EDIT",
+        "ELSE","END","ERASE","ERROR","FIELD","FILES","FOR","GET","GOSUB","GOTO","IF","INPUT",
+        "KEY","KILL","LET","LINE","LIST","LOAD","LOCATE","LOOP","LPRINT","LSET","MERGE",
+        "MID$","NAME","NEW","NEXT","NOT","ON","OPEN","OPTION","OR","OUT","PAINT","PLAY",
+        "POKE","PRESET","PRINT","PSET","PUT","RANDOMIZE","READ","REM","RENUM","RESET","RESTORE",
+        "RESUME","RETURN","RSET","RUN","SAVE","SCREEN","SEEK","SOUND","STEP","STOP","SWAP",
+        "SYSTEM","THEN","TO","TROFF","TRON","USING","VIEW","WEND","WHILE","WIDTH","WINDOW","WRITE"
+    };
+    for (size_t i = 0; i < sizeof(kws)/sizeof(kws[0]); i++) {
+        const char *kw = kws[i];
+        if (strlen(kw) == len && strncasecmp(id, kw, len) == 0) return true;
+    }
+    return false;
+}
+
 static StmtList split_statements(const char *line_text) {
     // split by ':' not within double quotes
     StmtList sl = {0};
@@ -6342,7 +6357,7 @@ if (do_split && c == ':' && !inq) {
                     while (q < s && (isalnum((unsigned char)*q) || *q == '_' || *q == '$')) q++;
                     const char *r = q;
                     while (r < s && (*r == ' ' || *r == '\t')) r++;
-                    if (r == s) do_split = false;
+                    if (r == s && !is_reserved_basic_keyword_ci(p, (size_t)(q - p))) do_split = false;
                 }
             }
         }
@@ -6389,6 +6404,7 @@ static bool parse_leading_label_def(const char *s, char *out_label_upper, size_t
     const char *a = p;
     while (isalnum((unsigned char)*p) || *p == '_' || *p == '$') p++;
     const char *b = p;
+    if (is_reserved_basic_keyword_ci(a, (size_t)(b - a))) return false;
 
     while (*p == ' ' || *p == '\t') p++;
     if (*p != ':') return false;
