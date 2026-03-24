@@ -1702,6 +1702,55 @@ static gboolean on_cmd_focus_out(GtkWidget *w, GdkEvent *e, gpointer user_data) 
 }
 #endif /* !WBASIC_NO_UI */
 
+#ifndef WBASIC_NO_UI
+/* During runtime INPUT, keep accepting typing even when output window has focus. */
+static gboolean cmd_entry_forward_runtime_input_key(App *app, GdkEventKey *e) {
+    if (!app || !e || !app->cmd_entry || !GTK_IS_ENTRY(app->cmd_entry)) return FALSE;
+
+    GtkEditable *ed = GTK_EDITABLE(app->cmd_entry);
+    int pos = gtk_editable_get_position(ed);
+
+    switch (e->keyval) {
+        case GDK_KEY_Return:
+        case GDK_KEY_KP_Enter:
+            g_signal_emit_by_name(app->cmd_entry, "activate");
+            return TRUE;
+        case GDK_KEY_BackSpace:
+            if (pos > 0) gtk_editable_delete_text(ed, pos - 1, pos);
+            return TRUE;
+        case GDK_KEY_Delete:
+            gtk_editable_delete_text(ed, pos, pos + 1);
+            return TRUE;
+        case GDK_KEY_Left:
+            gtk_editable_set_position(ed, pos > 0 ? pos - 1 : 0);
+            return TRUE;
+        case GDK_KEY_Right:
+            gtk_editable_set_position(ed, pos + 1);
+            return TRUE;
+        case GDK_KEY_Home:
+            gtk_editable_set_position(ed, 0);
+            return TRUE;
+        case GDK_KEY_End:
+            gtk_editable_set_position(ed, -1);
+            return TRUE;
+        default:
+            break;
+    }
+
+    if (e->state & (GDK_CONTROL_MASK | GDK_MOD1_MASK | GDK_SUPER_MASK)) return FALSE;
+
+    gunichar uc = gdk_keyval_to_unicode(e->keyval);
+    if (uc >= 0x20) {
+        char utf8[8] = {0};
+        int n = g_unichar_to_utf8(uc, utf8);
+        gtk_editable_insert_text(ed, utf8, n, &pos);
+        gtk_editable_set_position(ed, pos);
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif /* !WBASIC_NO_UI */
+
 
 
 
@@ -15779,6 +15828,9 @@ if (app->key_trap_enabled && !(app->run_state == RUN_WAITING && app->input_waiti
     if (app->run_state == RUN_WAITING && app->input_waiting) {
         if (e->keyval == GDK_KEY_Escape) {
             do_stop(app);
+            return TRUE;
+        }
+        if (w != app->win && cmd_entry_forward_runtime_input_key(app, e)) {
             return TRUE;
         }
         return FALSE; /* let the GtkEntry receive the keystroke */
