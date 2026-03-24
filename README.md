@@ -36,6 +36,7 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
 
 ## Limitations and differences
 - Graphics are available in the GTK UI build, and exported standalone programs now automatically use the GTK runtime when the source uses graphics `SCREEN` modes; CLI/headless runtime mode still reports graphics as unavailable
+- Source lines without numeric prefixes are now accepted during program ingest (auto-numbered internally in source order); QBasic-style label targets remain available via optional `--qbasic-labels` mode
 - `SCREEN` accepts the common optional arguments for compatibility, but currently ignores `colorburst`, `apage`, and `vpage`
 - `LINE` parses style arguments for compatibility, but patterned line styles are not yet applied
 - `CIRCLE` currently supports center, radius, and optional color; aspect, start/end angles, and other extended GW-BASIC options are not yet implemented

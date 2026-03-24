@@ -627,6 +627,8 @@ static void print_usage(const char *prog)
 typedef struct {
     int line_no;
     char *text;      // raw text after line number (may contain ':')
+    bool had_explicit_number; // whether the source line originally included an explicit numeric prefix
+    int source_editor_line_idx; // 0-based editor visual line index when parsed from editor text; -1 when unknown
 } Line;
 
 typedef struct {
@@ -1566,6 +1568,25 @@ static void editor_jump_to_basic_line(App *app, int line_no) {
         if (!gtk_text_iter_forward_line(&it)) break;
     }
 }
+#endif /* !WBASIC_NO_UI */
+
+#ifndef WBASIC_NO_UI
+static void editor_focus_program_line_idx(App *app, int line_idx) {
+    if (!app || !app->editor_view || line_idx < 0) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(app->editor_view));
+    if (!buf) return;
+
+    GtkTextIter line_start;
+    gtk_text_buffer_get_iter_at_line(buf, &line_start, line_idx);
+    GtkTextIter line_end = line_start;
+    gtk_text_iter_forward_to_line_end(&line_end);
+
+    gtk_text_buffer_select_range(buf, &line_start, &line_end);
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(app->editor_view), &line_start, 0.15, TRUE, 0.0, 0.2);
+    gtk_widget_grab_focus(app->editor_view);
+}
+#else
+static void editor_focus_program_line_idx(App *app, int line_idx) { (void)app; (void)line_idx; }
 #endif /* !WBASIC_NO_UI */
 
 
@@ -3298,6 +3319,7 @@ static bool starts_ci(const char *s, const char *p) {
 }
 
 
+
 /* Find single-line ELSE keyword in an IF ... THEN <stmt> [ELSE <stmt>] tail.
    Returns pointer to the 'E' in ELSE within the same buffer, or NULL.
    Skips quoted string literals ("...") and respects doubled quotes (""). */
@@ -3466,7 +3488,7 @@ static void program_delete_line(Program *p, int line_no) {
     p->count--;
 }
 
-static void program_set_line(Program *p, int line_no, const char *text) {
+static void program_set_line_ex(Program *p, int line_no, const char *text, bool had_explicit_number, int source_editor_line_idx) {
     if (!text) text = "";
     char *tmp = xstrdup(text);
     char *t = trim(tmp);
@@ -3479,7 +3501,9 @@ static void program_set_line(Program *p, int line_no, const char *text) {
     int idx = program_find_index(p, line_no);
     if (idx >= 0) {
         free(p->lines[idx].text);
-        p->lines[idx].text = xstrdup(t);
+        p->lines[idx].text = xstrdup(text);
+        p->lines[idx].had_explicit_number = had_explicit_number;
+        p->lines[idx].source_editor_line_idx = source_editor_line_idx;
         free(tmp);
         return;
     }
@@ -3488,9 +3512,15 @@ static void program_set_line(Program *p, int line_no, const char *text) {
     program_ensure_cap(p, p->count + 1);
     memmove(&p->lines[pos+1], &p->lines[pos], (p->count - (size_t)pos) * sizeof(Line));
     p->lines[pos].line_no = line_no;
-    p->lines[pos].text = xstrdup(t);
+    p->lines[pos].text = xstrdup(text);
+    p->lines[pos].had_explicit_number = had_explicit_number;
+    p->lines[pos].source_editor_line_idx = source_editor_line_idx;
     p->count++;
     free(tmp);
+}
+
+static void program_set_line(Program *p, int line_no, const char *text) {
+    program_set_line_ex(p, line_no, text, true, -1);
 }
 
 /* ===================== Editor <-> Program sync ===================== */
@@ -3522,7 +3552,13 @@ static void program_to_editor(App *app) {
     if (!wbasic_has_ui_buffers(app)) return; /* no GTK editor in CLI mode */
     GString *gs = g_string_new(NULL);
     for (size_t i = 0; i < app->prog.count; i++) {
-        g_string_append_printf(gs, "%d %s\n", app->prog.lines[i].line_no, app->prog.lines[i].text);
+        if (app->prog.lines[i].had_explicit_number) {
+            const char *txt = app->prog.lines[i].text ? app->prog.lines[i].text : "";
+            if (*txt == ' ' || *txt == '\t') g_string_append_printf(gs, "%d%s\n", app->prog.lines[i].line_no, txt);
+            else g_string_append_printf(gs, "%d %s\n", app->prog.lines[i].line_no, txt);
+        } else {
+            g_string_append_printf(gs, "%s\n", app->prog.lines[i].text);
+        }
     }
     editor_set_text(app->editor_buf, gs->str);
     g_string_free(gs, TRUE);
@@ -3556,25 +3592,38 @@ static bool editor_to_program(App *app) {
         src = all ? all : "";
     }
 
-    char *saveptr = NULL;
-    for (char *line = strtok_r(all, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
+    int auto_line_no = 10;
+    int editor_line_idx = 0;
+    for (char *line = all; line; ) {
+        char *next = strchr(line, '\n');
+        if (next) *next = 0;
+
         char *t = trim(line);
-        if (*t == 0) continue;
+        if (*t == 0) {
+            editor_line_idx++;
+            if (!next) break;
+            line = next + 1;
+            continue;
+        }
 
         char *endp = NULL;
         long ln = strtol(t, &endp, 10);
-        if (endp != t) {
+        if (endp != t && (isspace((unsigned char)*endp) || *endp == 0)) {
             int line_no = (int)ln;
-            char *stmt = trim(endp);
-            program_set_line(&app->prog, line_no, stmt);
+            program_set_line_ex(&app->prog, line_no, endp, true, editor_line_idx);
+            auto_line_no = line_no + 1;
         } else {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "ERROR: Program lines must start with a line number: %.200s\n", t);
-            if (wbasic_ui_active(app)) out_append(app, msg);
-            else fputs(msg, stderr);
-            g_free(all);
-            return false;
+            // Allow unnumbered editor lines by auto-numbering during parse.
+            // This preserves command-editor workflows where users type:
+            //   LABEL:
+            //   PRINT "..."
+            //   GOTO LABEL
+            program_set_line_ex(&app->prog, auto_line_no++, line, false, editor_line_idx);
         }
+        editor_line_idx++;
+
+        if (!next) break;
+        line = next + 1;
     }
 
     g_free(all);
@@ -6005,8 +6054,56 @@ if (app->exec_cursor_valid) {
 
 
     set_run_state(app, RUN_STOPPED);
-    if (line_no >= 0) out_printf(app, "ERROR at %d: %s\n", line_no, msg);
+
+    int display_line_no = line_no;
+    int focus_line_idx = -1;
+    if (app->exec_cursor_valid && app->exec_line_idx >= 0) {
+        focus_line_idx = app->exec_line_idx;
+    } else if (line_no >= 0) {
+        focus_line_idx = program_find_index(&app->prog, line_no);
+    }
+
+    if (focus_line_idx >= 0 && focus_line_idx < (int)app->prog.count) {
+        if (!app->prog.lines[focus_line_idx].had_explicit_number) {
+            display_line_no = -1;
+        }
+    }
+
+    if (display_line_no >= 0) out_printf(app, "ERROR at %d: %s\n", display_line_no, msg);
     else out_printf(app, "ERROR: %s\n", msg);
+
+    int focus_editor_line_idx = focus_line_idx;
+    if (focus_line_idx >= 0 && focus_line_idx < (int)app->prog.count) {
+        int src = app->prog.lines[focus_line_idx].source_editor_line_idx;
+        if (src >= 0) focus_editor_line_idx = src;
+    }
+    editor_focus_program_line_idx(app, focus_editor_line_idx);
+}
+
+static void report_stopped(App *app, int program_line_idx, int fallback_line_no) {
+    if (!app) return;
+
+    int focus_editor_line_idx = -1;
+    int explicit_line_no = -1;
+
+    int idx = program_line_idx;
+    if (idx < 0 && fallback_line_no > 0) idx = program_find_index(&app->prog, fallback_line_no);
+
+    if (idx >= 0 && idx < (int)app->prog.count) {
+        const Line *ln = &app->prog.lines[idx];
+        if (ln->had_explicit_number && ln->line_no > 0) explicit_line_no = ln->line_no;
+        focus_editor_line_idx = (ln->source_editor_line_idx >= 0) ? ln->source_editor_line_idx : idx;
+    }
+
+    char sbuf[96];
+    if (explicit_line_no > 0) {
+        snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", explicit_line_no);
+    } else {
+        snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
+    }
+    out_append(app, sbuf);
+
+    editor_focus_program_line_idx(app, focus_editor_line_idx);
 }
 
 
@@ -6184,6 +6281,21 @@ if (do_split && c == ':' && !inq) {
                     }
                 }
             }
+
+            // Do not split on the ':' that terminates a leading symbolic label.
+            // Example: "LOOP_TOP: PRINT 1" should stay a single statement here;
+            // the label prefix is handled by exec_single_statement.
+            if (do_split) {
+                const char *p = start;
+                while (p < s && (*p == ' ' || *p == '\t')) p++;
+                if (p < s && (isalpha((unsigned char)*p) || *p == '_')) {
+                    const char *q = p + 1;
+                    while (q < s && (isalnum((unsigned char)*q) || *q == '_' || *q == '$')) q++;
+                    const char *r = q;
+                    while (r < s && (*r == ' ' || *r == '\t')) r++;
+                    if (r == s) do_split = false;
+                }
+            }
         }
         if (do_split) {
             size_t len = (size_t)(s - start);
@@ -6212,6 +6324,51 @@ if (do_split && c == ':' && !inq) {
         }
     }
     return sl;
+}
+
+/* Parse a leading symbolic label definition:
+   <ws>IDENT<ws>:<rest>
+   Returns true when present, with label uppercased into out_label_upper and
+   out_after_colon pointing just after ':' in the original string. */
+static bool parse_leading_label_def(const char *s, char *out_label_upper, size_t out_cap, const char **out_after_colon) {
+    if (!s || !out_label_upper || out_cap == 0 || !out_after_colon) return false;
+
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!(isalpha((unsigned char)*p) || *p == '_')) return false;
+
+    const char *a = p;
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '$') p++;
+    const char *b = p;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return false;
+
+    size_t n = (size_t)(b - a);
+    if (n + 1 > out_cap) n = out_cap - 1;
+    for (size_t i = 0; i < n; i++) out_label_upper[i] = (char)toupper((unsigned char)a[i]);
+    out_label_upper[n] = 0;
+    *out_after_colon = p + 1;
+    return true;
+}
+
+/* Find a symbolic label target by name (uppercase identifier). */
+static int program_find_label_index(const Program *p, const char *label_upper) {
+    if (!p || !label_upper || !*label_upper) return -1;
+    for (size_t li = 0; li < p->count; li++) {
+        const char *text = p->lines[li].text ? p->lines[li].text : "";
+        StmtList sl = split_statements(text);
+        for (int si = 0; si < sl.count; si++) {
+            char lab[128];
+            const char *after = NULL;
+            if (parse_leading_label_def(sl.stmts[si], lab, sizeof(lab), &after) && strcmp(lab, label_upper) == 0) {
+                stmtlist_free(&sl);
+                return (int)li;
+            }
+        }
+        stmtlist_free(&sl);
+    }
+    return -1;
 }
 
 
@@ -10012,10 +10169,33 @@ static bool exec_exit_do(App *app, int current_line, int *line_idx, int *stmt_id
 
 /* ---- GOSUB/RETURN ---- */
 static bool exec_gosub(App *app, Parser *p, int current_line, int cur_line_idx, int cur_stmt_idx, int *line_idx, int *stmt_idx) {
-    double ln = 0.0;
-    if (!parse_expr(app, p, &ln)) { runtime_error(app, current_line, "GOSUB expects line number"); return false; }
-    int target_line = (int)llround(ln);
-    int idx = program_find_index(&app->prog, target_line);
+    int idx = -1;
+    const char *orig = p->s;
+    skip_ws(p);
+    if (isalpha((unsigned char)*p->s) || *p->s == '_') {
+        const char *a = p->s;
+        while (isalnum((unsigned char)*p->s) || *p->s == '_' || *p->s == '$') p->s++;
+        const char *b = p->s;
+        const char *t = p->s;
+        while (*t == ' ' || *t == '\t') t++;
+        if (*t == 0) {
+            char lab[128];
+            size_t n = (size_t)(b - a);
+            if (n + 1 > sizeof(lab)) n = sizeof(lab) - 1;
+            for (size_t i = 0; i < n; i++) lab[i] = (char)toupper((unsigned char)a[i]);
+            lab[n] = 0;
+            idx = program_find_label_index(&app->prog, lab);
+        } else {
+            p->s = a; // not a pure label target; fall back to numeric expression
+        }
+    }
+    if (idx < 0) {
+        p->s = orig;
+        double ln = 0.0;
+        if (!parse_expr(app, p, &ln)) { runtime_error(app, current_line, "GOSUB expects line number"); return false; }
+        int target_line = (int)llround(ln);
+        idx = program_find_index(&app->prog, target_line);
+    }
     if (idx < 0) { runtime_error(app, current_line, "GOSUB target not found"); return false; }
 
     if (app->gosub_sp >= 128) { runtime_error(app, current_line, "GOSUB stack overflow"); return false; }
@@ -10456,6 +10636,21 @@ static bool exec_single_statement(App *app, const char *stmt, int current_line, 
     char *tmp = xstrdup(stmt);
     char *s = trim(tmp);
     if (*s == 0) { free(tmp); return true; }
+
+    /* Optional symbolic label prefix: LABEL: <statement>.
+       A label-only statement (LABEL:) is a no-op anchor target. */
+    {
+        char label[128];
+        const char *after_colon = NULL;
+        if (parse_leading_label_def(s, label, sizeof(label), &after_colon)) {
+            char *rest = trim((char*)after_colon);
+            if (*rest == 0) {
+                free(tmp);
+                return true;
+            }
+            s = rest;
+        }
+    }
 
 /* Block IF markers: ELSE / END IF / ENDIF */
 if (current_line >= 0) {
@@ -11560,10 +11755,31 @@ return true;
     // GOTO
     if (starts_ci(s, "GOTO") && is_word_boundary(s[4])) {
         Parser p = { s + 4 };
-        double ln = 0.0;
-        if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "GOTO expects line number"); free(tmp); return false; }
-        int target = (int)llround(ln);
-        int idx = program_find_index(&app->prog, target);
+        int idx = -1;
+        const char *orig = p.s;
+        skip_ws(&p);
+        if (isalpha((unsigned char)*p.s) || *p.s == '_') {
+            const char *a = p.s;
+            while (isalnum((unsigned char)*p.s) || *p.s == '_' || *p.s == '$') p.s++;
+            const char *b = p.s;
+            const char *t = p.s;
+            while (*t == ' ' || *t == '\t') t++;
+            if (*t == 0) {
+                char lab[128];
+                size_t n = (size_t)(b - a);
+                if (n + 1 > sizeof(lab)) n = sizeof(lab) - 1;
+                for (size_t i = 0; i < n; i++) lab[i] = (char)toupper((unsigned char)a[i]);
+                lab[n] = 0;
+                idx = program_find_label_index(&app->prog, lab);
+            }
+        }
+        if (idx < 0) {
+            p.s = orig;
+            double ln = 0.0;
+            if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "GOTO expects line number"); free(tmp); return false; }
+            int target = (int)llround(ln);
+            idx = program_find_index(&app->prog, target);
+        }
         if (idx < 0) { runtime_error(app, current_line, "GOTO target not found"); free(tmp); return false; }
         *line_idx = idx;
         *stmt_idx = 0;
@@ -12317,18 +12533,7 @@ static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool 
             // Execution was interrupted (user STOP/BREAK or a deferred stop for LOAD).
 
     set_run_state(app, RUN_STOPPED);
-            {
-                int stop_line_no = -1;
-                if (line_idx >= 0 && line_idx < (int)app->prog.count) stop_line_no = app->prog.lines[line_idx].line_no;
-                else if (app->ui_last_exec_line > 0) stop_line_no = app->ui_last_exec_line;
-                char sbuf[96];
-                if (stop_line_no > 0) {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", stop_line_no);
-                } else {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
-                }
-                out_append(app, sbuf);
-            }
+            report_stopped(app, line_idx, app->ui_last_exec_line);
             // If a LOAD was requested while running, perform it now (stop -> clear output -> load -> idle).
             if (app->pending_load_path) {
                 set_run_state(app, RUN_IDLE);
@@ -12660,10 +12865,24 @@ static void do_new(App *app) {
 }
 
 static void do_list(App *app) {
-    // LIST should refresh/rebuild the editor contents from the current program,
-    // not dump the listing to the output pane.
-    if (!editor_to_program(app)) return;
-    program_to_editor(app);
+    if (!app) return;
+
+    // GTK editor mode: keep the editor text exactly as authored.
+    // LIST should not rewrite whitespace/blank lines/indentation in-place.
+    if (wbasic_has_ui_buffers(app)) {
+        return;
+    }
+
+    // CLI/headless mode: print current in-memory program.
+    for (size_t i = 0; i < app->prog.count; i++) {
+        if (app->prog.lines[i].had_explicit_number) {
+            const char *txt = app->prog.lines[i].text ? app->prog.lines[i].text : "";
+            if (*txt == ' ' || *txt == '\t') out_printf(app, "%d%s\n", app->prog.lines[i].line_no, txt);
+            else out_printf(app, "%d %s\n", app->prog.lines[i].line_no, txt);
+        } else {
+            out_printf(app, "%s\n", app->prog.lines[i].text ? app->prog.lines[i].text : "");
+        }
+    }
 }
 
 // Ensure a filename ends with .bas (case-insensitive). Returns newly-allocated string (g_free when done).
@@ -13059,19 +13278,81 @@ static char *renum_rewrite_text(const char *in, const int *old_nums, const int *
     return out;
 }
 
+static char *renum_rewrite_editor_text_preserve_layout(const char *src, const int *old_nums, const int *new_nums, size_t nmap) {
+    if (!src) return xstrdup("");
+    GString *out = g_string_new(NULL);
+
+    const char *line = src;
+    while (line) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+
+        char *buf = (char*)malloc(len + 1);
+        if (!buf) {
+            g_string_free(out, TRUE);
+            return xstrdup(src);
+        }
+        memcpy(buf, line, len);
+        buf[len] = 0;
+
+        char *p = buf;
+        while (*p == ' ' || *p == '\t') p++;
+        char *endp = NULL;
+        long ln = strtol(p, &endp, 10);
+        if (endp != p && (isspace((unsigned char)*endp) || *endp == 0)) {
+            int oldv = (int)ln;
+            int newv = renum_lookup(old_nums, new_nums, nmap, oldv);
+            if (newv < 0) newv = oldv;
+
+            g_string_append_len(out, buf, (gssize)(p - buf));
+            g_string_append_printf(out, "%d", newv);
+
+            char *rew = renum_rewrite_text(endp, old_nums, new_nums, nmap);
+            if (rew) {
+                g_string_append(out, rew);
+                free(rew);
+            }
+        } else {
+            g_string_append_len(out, buf, (gssize)len);
+        }
+
+        free(buf);
+        if (!nl) break;
+        g_string_append_c(out, '\n');
+        line = nl + 1;
+    }
+
+    return g_string_free(out, FALSE);
+}
+
 static void do_renum(App *app, int start, int step) {
     if (!app) return;
     if (start <= 0 || step <= 0) { out_append(app, "ERROR: Illegal function call\n"); return; }
 
-    if (!editor_to_program(app)) return;
+    char *editor_snapshot = NULL;
+#ifndef WBASIC_NO_UI
+    if (wbasic_has_ui_buffers(app)) editor_snapshot = editor_get_text(app->editor_buf);
+#endif
+
+#define FREE_EDITOR_SNAPSHOT() do { if (editor_snapshot) { g_free(editor_snapshot); editor_snapshot = NULL; } } while(0)
+
+    if (!editor_to_program(app)) { FREE_EDITOR_SNAPSHOT(); return; }
     Program *p = &app->prog;
-    if (p->count == 0) { out_append(app, "OK\n"); return; }
+    if (p->count == 0) { out_append(app, "OK\n"); FREE_EDITOR_SNAPSHOT(); return; }
+
+    // Non-destructive behavior for unnumbered-authored programs:
+    // if no source lines had explicit numbers, RENUM is a no-op.
+    bool any_explicit = false;
+    for (size_t i = 0; i < p->count; i++) {
+        if (p->lines[i].had_explicit_number) { any_explicit = true; break; }
+    }
+    if (!any_explicit) { out_append(app, "OK\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     // Build mapping
     size_t n = p->count;
     int *old_nums = (int*)malloc(n * sizeof(int));
     int *new_nums = (int*)malloc(n * sizeof(int));
-    if (!old_nums || !new_nums) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); return; }
+    if (!old_nums || !new_nums) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     int cur = start;
     for (size_t i=0;i<n;i++) {
@@ -13082,11 +13363,13 @@ static void do_renum(App *app, int start, int step) {
 
     // Rewrite line texts with updated targets
     Line *new_lines = (Line*)calloc(n, sizeof(Line));
-    if (!new_lines) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); return; }
+    if (!new_lines) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     for (size_t i=0;i<n;i++) {
         new_lines[i].line_no = new_nums[i];
         new_lines[i].text = renum_rewrite_text(p->lines[i].text, old_nums, new_nums, n);
+        new_lines[i].had_explicit_number = true;
+        new_lines[i].source_editor_line_idx = -1;
         if (!new_lines[i].text) new_lines[i].text = xstrdup("");
     }
 
@@ -13096,11 +13379,25 @@ static void do_renum(App *app, int start, int step) {
     p->count = n;
     p->cap = n;
 
-    program_to_editor(app);
+#ifndef WBASIC_NO_UI
+    if (wbasic_has_ui_buffers(app) && editor_snapshot) {
+        char *rewritten = renum_rewrite_editor_text_preserve_layout(editor_snapshot, old_nums, new_nums, n);
+        app->suppress_dirty = true;
+        editor_set_text(app->editor_buf, rewritten ? rewritten : "");
+        app->suppress_dirty = false;
+        g_free(rewritten);
+        g_free(editor_snapshot);
+    } else
+#endif
+    {
+        program_to_editor(app);
+    }
 
     free(old_nums);
     free(new_nums);
     out_append(app, "OK\n");
+
+#undef FREE_EDITOR_SNAPSHOT
 }
 static void do_immediate(App *app, const char *cmdline) {
     app->exec_cursor_valid = false;
@@ -13159,16 +13456,7 @@ static void do_immediate(App *app, const char *cmdline) {
             app->stop_flag = true;
 
     set_run_state(app, RUN_STOPPED);
-            {
-                int stop_line_no = (app->ui_last_exec_line > 0) ? app->ui_last_exec_line : -1;
-                char sbuf[96];
-                if (stop_line_no > 0) {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", stop_line_no);
-                } else {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
-                }
-                out_append(app, sbuf);
-            }
+            report_stopped(app, -1, app->ui_last_exec_line);
         } else {
             out_append(app, "OK\n");
         }

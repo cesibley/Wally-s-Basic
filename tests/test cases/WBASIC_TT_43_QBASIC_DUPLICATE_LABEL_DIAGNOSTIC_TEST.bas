@@ -1,0 +1,2 @@
+PRINT "OK"
+END
