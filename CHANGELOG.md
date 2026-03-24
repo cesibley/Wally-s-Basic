@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fixed keyword-led colon statement splitting regressions in the interpreter.
+  - `CLEAR:COLOR 12,0:CLS:KEY OFF` now executes all chained statements correctly instead of treating `CLEAR:` like a symbolic label prefix.
+  - Nested loop chains like `...:NEXT:NEXT` now split and execute both `NEXT` statements correctly.
+  - `CLS` no longer resets current `COLOR` attributes to preference defaults, so `COLOR 12,0:CLS` preserves red text for subsequent output.
+
 - Documented the latest standalone exported graphics behavior in the project docs.
   - README now explains that exported programs auto-select headless or GTK runtime based on whether the BASIC source uses graphics `SCREEN` modes.
   - README now clarifies that graphics-capable exports launch directly into the output window and use the exported program name for the GTK window title.
