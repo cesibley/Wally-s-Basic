@@ -1,5 +1,6 @@
 10 SCREEN 1: CLS
 20 C = 6
+25 COLOR C
 30 S = 10
 40 DRAW "BM+5,+5"
 50 DRAW "R=S; D=S; L=S; U=S;"

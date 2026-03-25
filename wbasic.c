@@ -11770,10 +11770,42 @@ if (resume_next && app->err_origin_in_chain && app->err_origin_chain_text) {
 app->err_origin_valid = false;
 
 *line_idx = target_idx;
-*stmt_idx = target_stmt;
-free(tmp);
-return true;
-}
+	*stmt_idx = target_stmt;
+	free(tmp);
+	return true;
+	}
+
+	// ERROR <code>  (GW-BASIC/QBASIC: raise runtime error)
+	if (starts_ci(s, "ERROR") && is_word_boundary(s[5])) {
+	    Parser p = { s + 5 };
+	    skip_ws(&p);
+
+	    double dv = 0.0;
+	    if (!parse_expr(app, &p, &dv)) {
+	        runtime_error(app, current_line, "ERROR expects error code");
+	        free(tmp);
+	        return false;
+	    }
+	    skip_ws(&p);
+	    if (*p.s != 0) {
+	        runtime_error(app, current_line, "Syntax error");
+	        free(tmp);
+	        return false;
+	    }
+
+	    int code = (int)llround(dv);
+	    if (!isfinite(dv) || fabs(dv - (double)code) > 1e-9 || code < 0) {
+	        runtime_error(app, current_line, "Illegal function call");
+	        free(tmp);
+	        return false;
+	    }
+
+	    /* Raise a runtime error and preserve the user-requested ERR code. */
+	    runtime_error(app, current_line, "User-defined error");
+	    app->last_err_code = code;
+	    free(tmp);
+	    return false;
+	}
 
 
 // ON <expr> GOTO/GOSUB <line-list>
@@ -11964,54 +11996,63 @@ return true;
                 if (*p3.s == 0 || (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4]))) {
                     if (cond) {
                         int idx = program_find_label_index(&app->prog, then_label);
-                        free(then_label);
-                        if (idx < 0) { runtime_error(app, current_line, "THEN target not found"); free(tmp); return false; }
-                        *line_idx = idx;
-                        *stmt_idx = 0;
-                        free(tmp);
-                        return true;
-                    }
-
-                    /* cond is false: optional ELSE <line#|label> */
-                    if (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4])) {
-                        p3.s += 4;
-                        skip_ws(&p3);
-
-                        Parser p4 = { p3.s };
-                        double ln2 = 0.0;
-                        if (parse_number(&p4, &ln2)) {
-                            int target = (int)llround(ln2);
-                            int idx = program_find_index(&app->prog, target);
+                        if (idx >= 0) {
                             free(then_label);
-                            if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
                             *line_idx = idx;
                             *stmt_idx = 0;
                             free(tmp);
                             return true;
                         }
+                        /* Ambiguous shorthand (e.g., THEN RESUME without RESUME: label):
+                           fall through and parse as statement form. */
+                    } else {
+                        /* cond is false: optional ELSE <line#|label> */
+                        if (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4])) {
+                            p3.s += 4;
+                            skip_ws(&p3);
 
-                        char *else_label = NULL;
-                        if (parse_identifier(&p4, &else_label)) {
-                            if (!is_reserved_basic_keyword_ci(else_label, strlen(else_label))) {
-                                skip_ws(&p4);
-                                if (*p4.s == 0) {
-                                    int idx = program_find_label_index(&app->prog, else_label);
+                            Parser p4 = { p3.s };
+                            double ln2 = 0.0;
+                            if (parse_number(&p4, &ln2)) {
+                                int target = (int)llround(ln2);
+                                int idx = program_find_index(&app->prog, target);
+                                free(then_label);
+                                if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
+                                *line_idx = idx;
+                                *stmt_idx = 0;
+                                free(tmp);
+                                return true;
+                            }
+
+                            char *else_label = NULL;
+                            if (parse_identifier(&p4, &else_label)) {
+                                if (!is_reserved_basic_keyword_ci(else_label, strlen(else_label))) {
+                                    skip_ws(&p4);
+                                    if (*p4.s == 0) {
+                                        int idx = program_find_label_index(&app->prog, else_label);
+                                        free(else_label);
+                                        if (idx >= 0) {
+                                            free(then_label);
+                                            *line_idx = idx;
+                                            *stmt_idx = 0;
+                                            free(tmp);
+                                            return true;
+                                        }
+                                        /* Ambiguous ELSE shorthand with no matching label:
+                                           fall through to statement-form ELSE parsing. */
+                                    } else {
+                                        free(else_label);
+                                    }
+                                } else {
                                     free(else_label);
-                                    free(then_label);
-                                    if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
-                                    *line_idx = idx;
-                                    *stmt_idx = 0;
-                                    free(tmp);
-                                    return true;
                                 }
                             }
-                            free(else_label);
+                        } else {
+                            free(then_label);
+                            free(tmp);
+                            return true; /* false condition with no ELSE */
                         }
                     }
-
-                    free(then_label);
-                    free(tmp);
-                    return true; /* false condition with no matching ELSE target */
                 }
             }
             free(then_label);
