@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## [Unreleased]
+
+- Fixed keyword-led colon statement splitting regressions in the interpreter.
+  - `CLEAR:COLOR 12,0:CLS:KEY OFF` now executes all chained statements correctly instead of treating `CLEAR:` like a symbolic label prefix.
+  - Nested loop chains like `...:NEXT:NEXT` now split and execute both `NEXT` statements correctly.
+  - `CLS` no longer resets current `COLOR` attributes to preference defaults, so `COLOR 12,0:CLS` preserves red text for subsequent output.
+
+- Documented the latest standalone exported graphics behavior in the project docs.
+  - README now explains that exported programs auto-select headless or GTK runtime based on whether the BASIC source uses graphics `SCREEN` modes.
+  - README now clarifies that graphics-capable exports launch directly into the output window and use the exported program name for the GTK window title.
+
+- Documented the latest experimental UI refresh in the project docs.
+  - README now starts with an experimental-version notice clarifying that the UI changes are not yet merged into the main codebase.
+  - README now notes that the GTK UI uses separate editor and output windows.
+  - README now documents that the output window is shown automatically and that editor/output window geometry is persisted independently.
+
+- Documented mixed source-format authoring support in project docs.
+  - README now calls out support for BASIC source without line numbers (auto-numbered on ingest).
+  - README now explicitly documents that QBasic-style label targets are enabled by default.
+
 ## [V2.0] – March 21, 2026
 
 - Versioned the release as V2.0 across the project documentation and UI.

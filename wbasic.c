@@ -627,6 +627,8 @@ static void print_usage(const char *prog)
 typedef struct {
     int line_no;
     char *text;      // raw text after line number (may contain ':')
+    bool had_explicit_number; // whether the source line originally included an explicit numeric prefix
+    int source_editor_line_idx; // 0-based editor visual line index when parsed from editor text; -1 when unknown
 } Line;
 
 typedef struct {
@@ -907,6 +909,7 @@ static const ScreenModeSpec *screen_mode_spec_find(int mode) {
 typedef struct App {
     bool resume_from_gosub;
     GtkWidget *win;
+    GtkWidget *output_win;
     GtkTextBuffer *editor_buf;
     GtkTextBuffer *output_buf;
     GtkWidget *cmd_entry;
@@ -930,6 +933,9 @@ typedef struct App {
     RunState run_state;
     bool inkey_ready;
     char inkey_char;
+    bool inkey_waiting;
+    int inkey_wait_grace_statements;
+    bool statement_uses_inkey;
 
     /* Headless (CLI) terminal I/O state. Present in unified builds too. */
     int headless_tty_fd;
@@ -1012,15 +1018,18 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
     struct timeval start_tv;
 
     // Persisted UI settings
-    GtkWidget *paned;
     bool have_win_size;
     int win_w;
     int win_h;
     bool have_win_pos;
     int win_x;
     int win_y;
-    bool have_paned_pos;
-    int paned_pos;
+    bool have_output_win_size;
+    int output_win_w;
+    int output_win_h;
+    bool have_output_win_pos;
+    int output_win_x;
+    int output_win_y;
     char *font_name; // e.g., "Monospace 12"
 
     // Output speed preference: 0.0 = Slow (slow), 1.0 = Fast (no delay)
@@ -1029,6 +1038,7 @@ bool pending_key_macro_scheduled;   // idle callback scheduled
 double print_throttle_carry_ms;
     bool export_include_speed; // if true, embed output speed into exported headless builds
     bool show_splash;          // if true, show startup splash dialog (GUI only)
+    bool embedded_ui_export;   // true for exported embedded programs using the GTK runtime
     GtkWidget *splash_dlg;     // active splash dialog (or NULL)
     char *deferred_startup_file; // if set, load this file after splash dismiss
     bool deferred_autorun;       // if true, run after splash dismiss (after optional load)
@@ -1329,6 +1339,7 @@ static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_dat
 
 /* Title bar / document tracking (forward decls) */
 static void update_window_title(App *app);
+static void ui_ensure_output_window_visible(App *app);
 static void set_current_path(App *app, const char *path_or_null);
 static void mark_dirty(App *app, bool dirty);
 #ifndef WBASIC_NO_UI
@@ -1559,6 +1570,25 @@ static void editor_jump_to_basic_line(App *app, int line_no) {
 }
 #endif /* !WBASIC_NO_UI */
 
+#ifndef WBASIC_NO_UI
+static void editor_focus_program_line_idx(App *app, int line_idx) {
+    if (!app || !app->editor_view || line_idx < 0) return;
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(app->editor_view));
+    if (!buf) return;
+
+    GtkTextIter line_start;
+    gtk_text_buffer_get_iter_at_line(buf, &line_start, line_idx);
+    GtkTextIter line_end = line_start;
+    gtk_text_iter_forward_to_line_end(&line_end);
+
+    gtk_text_buffer_select_range(buf, &line_start, &line_end);
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(app->editor_view), &line_start, 0.15, TRUE, 0.0, 0.2);
+    gtk_widget_grab_focus(app->editor_view);
+}
+#else
+static void editor_focus_program_line_idx(App *app, int line_idx) { (void)app; (void)line_idx; }
+#endif /* !WBASIC_NO_UI */
+
 
 
 
@@ -1668,6 +1698,55 @@ static gboolean on_cmd_focus_in(GtkWidget *w, GdkEvent *e, gpointer user_data) {
 static gboolean on_cmd_focus_out(GtkWidget *w, GdkEvent *e, gpointer user_data) {
     (void)w; (void)e; (void)user_data;
     /* No run-state changes on focus transitions for immediate command entry. */
+    return FALSE;
+}
+#endif /* !WBASIC_NO_UI */
+
+#ifndef WBASIC_NO_UI
+/* During runtime INPUT, keep accepting typing even when output window has focus. */
+static gboolean cmd_entry_forward_runtime_input_key(App *app, GdkEventKey *e) {
+    if (!app || !e || !app->cmd_entry || !GTK_IS_ENTRY(app->cmd_entry)) return FALSE;
+
+    GtkEditable *ed = GTK_EDITABLE(app->cmd_entry);
+    int pos = gtk_editable_get_position(ed);
+
+    switch (e->keyval) {
+        case GDK_KEY_Return:
+        case GDK_KEY_KP_Enter:
+            g_signal_emit_by_name(app->cmd_entry, "activate");
+            return TRUE;
+        case GDK_KEY_BackSpace:
+            if (pos > 0) gtk_editable_delete_text(ed, pos - 1, pos);
+            return TRUE;
+        case GDK_KEY_Delete:
+            gtk_editable_delete_text(ed, pos, pos + 1);
+            return TRUE;
+        case GDK_KEY_Left:
+            gtk_editable_set_position(ed, pos > 0 ? pos - 1 : 0);
+            return TRUE;
+        case GDK_KEY_Right:
+            gtk_editable_set_position(ed, pos + 1);
+            return TRUE;
+        case GDK_KEY_Home:
+            gtk_editable_set_position(ed, 0);
+            return TRUE;
+        case GDK_KEY_End:
+            gtk_editable_set_position(ed, -1);
+            return TRUE;
+        default:
+            break;
+    }
+
+    if (e->state & (GDK_CONTROL_MASK | GDK_MOD1_MASK | GDK_SUPER_MASK)) return FALSE;
+
+    gunichar uc = gdk_keyval_to_unicode(e->keyval);
+    if (uc >= 0x20) {
+        char utf8[8] = {0};
+        int n = g_unichar_to_utf8(uc, utf8);
+        gtk_editable_insert_text(ed, utf8, n, &pos);
+        gtk_editable_set_position(ed, pos);
+        return TRUE;
+    }
     return FALSE;
 }
 #endif /* !WBASIC_NO_UI */
@@ -2841,10 +2920,6 @@ static void out_printf(App *app, const char *fmt, ...) {
 static void out_clear(App *app, bool terminal_clear) {
     if (!app) return;
 
-    // Reset to Preferences exact colors at each CLS/OUT_CLEAR.
-    app->cur_fg = 16;
-    app->cur_bg = 16;
-
     /* CLI mode: do not touch GTK buffers/widgets. */
     if (!wbasic_ui_active(app)) {
         if (headless_stdout_is_tty()) {
@@ -3083,9 +3158,15 @@ static WB_UNUSED void prefs_save(App *app) {
         g_key_file_set_integer(kf, "ui", "win_x", app->win_x);
         g_key_file_set_integer(kf, "ui", "win_y", app->win_y);
     }
-    g_key_file_set_boolean(kf, "ui", "have_paned_pos", app->have_paned_pos);
-    if (app->have_paned_pos) {
-        g_key_file_set_integer(kf, "ui", "paned_pos", app->paned_pos);
+    g_key_file_set_boolean(kf, "ui", "have_output_win_size", app->have_output_win_size);
+    if (app->have_output_win_size) {
+        g_key_file_set_integer(kf, "ui", "output_win_w", app->output_win_w);
+        g_key_file_set_integer(kf, "ui", "output_win_h", app->output_win_h);
+    }
+    g_key_file_set_boolean(kf, "ui", "have_output_win_pos", app->have_output_win_pos);
+    if (app->have_output_win_pos) {
+        g_key_file_set_integer(kf, "ui", "output_win_x", app->output_win_x);
+        g_key_file_set_integer(kf, "ui", "output_win_y", app->output_win_y);
     }
     if (app->font_name && *app->font_name) {
         g_key_file_set_string(kf, "ui", "font", app->font_name);
@@ -3172,9 +3253,15 @@ static WB_UNUSED void prefs_load(App *app) {
         app->win_x = g_key_file_get_integer(kf, "ui", "win_x", NULL);
         app->win_y = g_key_file_get_integer(kf, "ui", "win_y", NULL);
     }
-    app->have_paned_pos = g_key_file_get_boolean(kf, "ui", "have_paned_pos", NULL);
-    if (app->have_paned_pos) {
-        app->paned_pos = g_key_file_get_integer(kf, "ui", "paned_pos", NULL);
+    app->have_output_win_size = g_key_file_get_boolean(kf, "ui", "have_output_win_size", NULL);
+    if (app->have_output_win_size) {
+        app->output_win_w = g_key_file_get_integer(kf, "ui", "output_win_w", NULL);
+        app->output_win_h = g_key_file_get_integer(kf, "ui", "output_win_h", NULL);
+    }
+    app->have_output_win_pos = g_key_file_get_boolean(kf, "ui", "have_output_win_pos", NULL);
+    if (app->have_output_win_pos) {
+        app->output_win_x = g_key_file_get_integer(kf, "ui", "output_win_x", NULL);
+        app->output_win_y = g_key_file_get_integer(kf, "ui", "output_win_y", NULL);
     }
     gchar *font = g_key_file_get_string(kf, "ui", "font", NULL);
     if (font) {
@@ -3275,6 +3362,7 @@ static bool starts_ci(const char *s, const char *p) {
     }
     return *p == 0;
 }
+
 
 
 /* Find single-line ELSE keyword in an IF ... THEN <stmt> [ELSE <stmt>] tail.
@@ -3445,7 +3533,7 @@ static void program_delete_line(Program *p, int line_no) {
     p->count--;
 }
 
-static void program_set_line(Program *p, int line_no, const char *text) {
+static void program_set_line_ex(Program *p, int line_no, const char *text, bool had_explicit_number, int source_editor_line_idx) {
     if (!text) text = "";
     char *tmp = xstrdup(text);
     char *t = trim(tmp);
@@ -3458,7 +3546,9 @@ static void program_set_line(Program *p, int line_no, const char *text) {
     int idx = program_find_index(p, line_no);
     if (idx >= 0) {
         free(p->lines[idx].text);
-        p->lines[idx].text = xstrdup(t);
+        p->lines[idx].text = xstrdup(text);
+        p->lines[idx].had_explicit_number = had_explicit_number;
+        p->lines[idx].source_editor_line_idx = source_editor_line_idx;
         free(tmp);
         return;
     }
@@ -3467,9 +3557,15 @@ static void program_set_line(Program *p, int line_no, const char *text) {
     program_ensure_cap(p, p->count + 1);
     memmove(&p->lines[pos+1], &p->lines[pos], (p->count - (size_t)pos) * sizeof(Line));
     p->lines[pos].line_no = line_no;
-    p->lines[pos].text = xstrdup(t);
+    p->lines[pos].text = xstrdup(text);
+    p->lines[pos].had_explicit_number = had_explicit_number;
+    p->lines[pos].source_editor_line_idx = source_editor_line_idx;
     p->count++;
     free(tmp);
+}
+
+static void program_set_line(Program *p, int line_no, const char *text) {
+    program_set_line_ex(p, line_no, text, true, -1);
 }
 
 /* ===================== Editor <-> Program sync ===================== */
@@ -3501,7 +3597,13 @@ static void program_to_editor(App *app) {
     if (!wbasic_has_ui_buffers(app)) return; /* no GTK editor in CLI mode */
     GString *gs = g_string_new(NULL);
     for (size_t i = 0; i < app->prog.count; i++) {
-        g_string_append_printf(gs, "%d %s\n", app->prog.lines[i].line_no, app->prog.lines[i].text);
+        if (app->prog.lines[i].had_explicit_number) {
+            const char *txt = app->prog.lines[i].text ? app->prog.lines[i].text : "";
+            if (*txt == ' ' || *txt == '\t') g_string_append_printf(gs, "%d%s\n", app->prog.lines[i].line_no, txt);
+            else g_string_append_printf(gs, "%d %s\n", app->prog.lines[i].line_no, txt);
+        } else {
+            g_string_append_printf(gs, "%s\n", app->prog.lines[i].text);
+        }
     }
     editor_set_text(app->editor_buf, gs->str);
     g_string_free(gs, TRUE);
@@ -3535,25 +3637,38 @@ static bool editor_to_program(App *app) {
         src = all ? all : "";
     }
 
-    char *saveptr = NULL;
-    for (char *line = strtok_r(all, "\n", &saveptr); line; line = strtok_r(NULL, "\n", &saveptr)) {
+    int auto_line_no = 10;
+    int editor_line_idx = 0;
+    for (char *line = all; line; ) {
+        char *next = strchr(line, '\n');
+        if (next) *next = 0;
+
         char *t = trim(line);
-        if (*t == 0) continue;
+        if (*t == 0) {
+            editor_line_idx++;
+            if (!next) break;
+            line = next + 1;
+            continue;
+        }
 
         char *endp = NULL;
         long ln = strtol(t, &endp, 10);
-        if (endp != t) {
+        if (endp != t && (isspace((unsigned char)*endp) || *endp == 0)) {
             int line_no = (int)ln;
-            char *stmt = trim(endp);
-            program_set_line(&app->prog, line_no, stmt);
+            program_set_line_ex(&app->prog, line_no, endp, true, editor_line_idx);
+            auto_line_no = line_no + 1;
         } else {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "ERROR: Program lines must start with a line number: %.200s\n", t);
-            if (wbasic_ui_active(app)) out_append(app, msg);
-            else fputs(msg, stderr);
-            g_free(all);
-            return false;
+            // Allow unnumbered editor lines by auto-numbering during parse.
+            // This preserves command-editor workflows where users type:
+            //   LABEL:
+            //   PRINT "..."
+            //   GOTO LABEL
+            program_set_line_ex(&app->prog, auto_line_no++, line, false, editor_line_idx);
         }
+        editor_line_idx++;
+
+        if (!next) break;
+        line = next + 1;
     }
 
     g_free(all);
@@ -5208,11 +5323,14 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
     {
         const char *save2 = p->s;
         if (consume_word_ci(p, "INKEY$")) {
+            app->statement_uses_inkey = true;
             if (!wbasic_ui_active(app)) headless_try_read_inkey(app);
             if (app->inkey_ready) {
                 char buf[2] = { app->inkey_char, 0 };
                 *out = xstrdup(buf);
                 app->inkey_ready = false;
+                app->inkey_waiting = false;
+                app->inkey_wait_grace_statements = 0;
 
                 // Key received during polling: show RUNNING again
                 if (app->run_state == RUN_WAITING) set_run_state(app, RUN_RUNNING);
@@ -5220,8 +5338,11 @@ static bool parse_string_atom(App *app, Parser *p, char **out) {
             } else {
                 *out = xstrdup("");
 
-                // INKEY$ is non-blocking. Keep status as RUNNING while polling.
-                // RUN_WAITING is reserved for truly blocking waits (e.g., INPUT dialogs).
+                // Tight INKEY$ polling loops should briefly surface WAITING so the
+                // status LED shows the historical amber "waiting for key" state.
+                app->inkey_waiting = true;
+                app->inkey_wait_grace_statements = 1;
+                if (app->run_state == RUN_RUNNING) set_run_state(app, RUN_WAITING);
                 return true;
             }
         }
@@ -5978,8 +6099,56 @@ if (app->exec_cursor_valid) {
 
 
     set_run_state(app, RUN_STOPPED);
-    if (line_no >= 0) out_printf(app, "ERROR at %d: %s\n", line_no, msg);
+
+    int display_line_no = line_no;
+    int focus_line_idx = -1;
+    if (app->exec_cursor_valid && app->exec_line_idx >= 0) {
+        focus_line_idx = app->exec_line_idx;
+    } else if (line_no >= 0) {
+        focus_line_idx = program_find_index(&app->prog, line_no);
+    }
+
+    if (focus_line_idx >= 0 && focus_line_idx < (int)app->prog.count) {
+        if (!app->prog.lines[focus_line_idx].had_explicit_number) {
+            display_line_no = -1;
+        }
+    }
+
+    if (display_line_no >= 0) out_printf(app, "ERROR at %d: %s\n", display_line_no, msg);
     else out_printf(app, "ERROR: %s\n", msg);
+
+    int focus_editor_line_idx = focus_line_idx;
+    if (focus_line_idx >= 0 && focus_line_idx < (int)app->prog.count) {
+        int src = app->prog.lines[focus_line_idx].source_editor_line_idx;
+        if (src >= 0) focus_editor_line_idx = src;
+    }
+    editor_focus_program_line_idx(app, focus_editor_line_idx);
+}
+
+static void report_stopped(App *app, int program_line_idx, int fallback_line_no) {
+    if (!app) return;
+
+    int focus_editor_line_idx = -1;
+    int explicit_line_no = -1;
+
+    int idx = program_line_idx;
+    if (idx < 0 && fallback_line_no > 0) idx = program_find_index(&app->prog, fallback_line_no);
+
+    if (idx >= 0 && idx < (int)app->prog.count) {
+        const Line *ln = &app->prog.lines[idx];
+        if (ln->had_explicit_number && ln->line_no > 0) explicit_line_no = ln->line_no;
+        focus_editor_line_idx = (ln->source_editor_line_idx >= 0) ? ln->source_editor_line_idx : idx;
+    }
+
+    char sbuf[96];
+    if (explicit_line_no > 0) {
+        snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", explicit_line_no);
+    } else {
+        snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
+    }
+    out_append(app, sbuf);
+
+    editor_focus_program_line_idx(app, focus_editor_line_idx);
 }
 
 
@@ -6059,6 +6228,25 @@ static void strip_inline_rem_comment(char *s) {
             return;
         }
     }
+}
+
+static bool is_reserved_basic_keyword_ci(const char *id, size_t len) {
+    if (!id || len == 0) return false;
+    static const char *const kws[] = {
+        "AND","AS","BEEP","CHAIN","CHDIR","CHDRIVE","CLEAR","CLOSE","CLS","COLOR","CONT",
+        "DATA","DEF","DEFDBL","DEFINT","DEFSNG","DEFSTR","DELETE","DIM","DO","DRAW","EDIT",
+        "ELSE","END","ERASE","ERROR","FIELD","FILES","FOR","GET","GOSUB","GOTO","IF","INPUT",
+        "KEY","KILL","LET","LINE","LIST","LOAD","LOCATE","LOOP","LPRINT","LSET","MERGE",
+        "MID$","NAME","NEW","NEXT","NOT","ON","OPEN","OPTION","OR","OUT","PAINT","PLAY",
+        "POKE","PRESET","PRINT","PSET","PUT","RANDOMIZE","READ","REM","RENUM","RESET","RESTORE",
+        "RESUME","RETURN","RSET","RUN","SAVE","SCREEN","SEEK","SOUND","STEP","STOP","SWAP",
+        "SYSTEM","THEN","TO","TROFF","TRON","USING","VIEW","WEND","WHILE","WIDTH","WINDOW","WRITE"
+    };
+    for (size_t i = 0; i < sizeof(kws)/sizeof(kws[0]); i++) {
+        const char *kw = kws[i];
+        if (strlen(kw) == len && strncasecmp(id, kw, len) == 0) return true;
+    }
+    return false;
 }
 
 static StmtList split_statements(const char *line_text) {
@@ -6157,6 +6345,21 @@ if (do_split && c == ':' && !inq) {
                     }
                 }
             }
+
+            // Do not split on the ':' that terminates a leading symbolic label.
+            // Example: "LOOP_TOP: PRINT 1" should stay a single statement here;
+            // the label prefix is handled by exec_single_statement.
+            if (do_split) {
+                const char *p = start;
+                while (p < s && (*p == ' ' || *p == '\t')) p++;
+                if (p < s && (isalpha((unsigned char)*p) || *p == '_')) {
+                    const char *q = p + 1;
+                    while (q < s && (isalnum((unsigned char)*q) || *q == '_' || *q == '$')) q++;
+                    const char *r = q;
+                    while (r < s && (*r == ' ' || *r == '\t')) r++;
+                    if (r == s && !is_reserved_basic_keyword_ci(p, (size_t)(q - p))) do_split = false;
+                }
+            }
         }
         if (do_split) {
             size_t len = (size_t)(s - start);
@@ -6185,6 +6388,52 @@ if (do_split && c == ':' && !inq) {
         }
     }
     return sl;
+}
+
+/* Parse a leading symbolic label definition:
+   <ws>IDENT<ws>:<rest>
+   Returns true when present, with label uppercased into out_label_upper and
+   out_after_colon pointing just after ':' in the original string. */
+static bool parse_leading_label_def(const char *s, char *out_label_upper, size_t out_cap, const char **out_after_colon) {
+    if (!s || !out_label_upper || out_cap == 0 || !out_after_colon) return false;
+
+    const char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!(isalpha((unsigned char)*p) || *p == '_')) return false;
+
+    const char *a = p;
+    while (isalnum((unsigned char)*p) || *p == '_' || *p == '$') p++;
+    const char *b = p;
+    if (is_reserved_basic_keyword_ci(a, (size_t)(b - a))) return false;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return false;
+
+    size_t n = (size_t)(b - a);
+    if (n + 1 > out_cap) n = out_cap - 1;
+    for (size_t i = 0; i < n; i++) out_label_upper[i] = (char)toupper((unsigned char)a[i]);
+    out_label_upper[n] = 0;
+    *out_after_colon = p + 1;
+    return true;
+}
+
+/* Find a symbolic label target by name (uppercase identifier). */
+static int program_find_label_index(const Program *p, const char *label_upper) {
+    if (!p || !label_upper || !*label_upper) return -1;
+    for (size_t li = 0; li < p->count; li++) {
+        const char *text = p->lines[li].text ? p->lines[li].text : "";
+        StmtList sl = split_statements(text);
+        for (int si = 0; si < sl.count; si++) {
+            char lab[128];
+            const char *after = NULL;
+            if (parse_leading_label_def(sl.stmts[si], lab, sizeof(lab), &after) && strcmp(lab, label_upper) == 0) {
+                stmtlist_free(&sl);
+                return (int)li;
+            }
+        }
+        stmtlist_free(&sl);
+    }
+    return -1;
 }
 
 
@@ -6933,6 +7182,7 @@ static bool exec_print_file(App *app, Parser *p, int current_line);
 static bool exec_write(App *app, Parser *p, int current_line);
 static bool exec_write_file(App *app, Parser *p, int current_line);
 static bool exec_input_file(App *app, Parser *p, int current_line, bool line_mode);
+static void finish_inkey_wait_after_statement(App *app);
 static bool exec_statement_chain_from(App *app, const char *text, int current_line,
                                      int base_line_idx, int base_stmt_idx,
                                      int start_si,
@@ -6966,6 +7216,7 @@ app->exec_stmt_idx = i; /* chain-local statement index */
 app->exec_line_no = current_line;
 
 if (!exec_single_statement(app, sl.stmts[i], current_line, base_line_idx, i, line_idx, stmt_idx)) {
+            finish_inkey_wait_after_statement(app);
             app->chain_active = prev_chain_active;
             app->chain_base_line_idx = prev_chain_base_li;
             app->chain_base_stmt_idx = prev_chain_base_si;
@@ -6973,6 +7224,8 @@ if (!exec_single_statement(app, sl.stmts[i], current_line, base_line_idx, i, lin
             stmtlist_free(&sl);
             return false;
         }
+
+        finish_inkey_wait_after_statement(app);
 
         // If statement changed flow (GOTO/GOSUB/etc), stop chaining here.
         if (*line_idx != li_before || *stmt_idx != si_before) {
@@ -9981,10 +10234,33 @@ static bool exec_exit_do(App *app, int current_line, int *line_idx, int *stmt_id
 
 /* ---- GOSUB/RETURN ---- */
 static bool exec_gosub(App *app, Parser *p, int current_line, int cur_line_idx, int cur_stmt_idx, int *line_idx, int *stmt_idx) {
-    double ln = 0.0;
-    if (!parse_expr(app, p, &ln)) { runtime_error(app, current_line, "GOSUB expects line number"); return false; }
-    int target_line = (int)llround(ln);
-    int idx = program_find_index(&app->prog, target_line);
+    int idx = -1;
+    const char *orig = p->s;
+    skip_ws(p);
+    if (isalpha((unsigned char)*p->s) || *p->s == '_') {
+        const char *a = p->s;
+        while (isalnum((unsigned char)*p->s) || *p->s == '_' || *p->s == '$') p->s++;
+        const char *b = p->s;
+        const char *t = p->s;
+        while (*t == ' ' || *t == '\t') t++;
+        if (*t == 0) {
+            char lab[128];
+            size_t n = (size_t)(b - a);
+            if (n + 1 > sizeof(lab)) n = sizeof(lab) - 1;
+            for (size_t i = 0; i < n; i++) lab[i] = (char)toupper((unsigned char)a[i]);
+            lab[n] = 0;
+            idx = program_find_label_index(&app->prog, lab);
+        } else {
+            p->s = a; // not a pure label target; fall back to numeric expression
+        }
+    }
+    if (idx < 0) {
+        p->s = orig;
+        double ln = 0.0;
+        if (!parse_expr(app, p, &ln)) { runtime_error(app, current_line, "GOSUB expects line number"); return false; }
+        int target_line = (int)llround(ln);
+        idx = program_find_index(&app->prog, target_line);
+    }
     if (idx < 0) { runtime_error(app, current_line, "GOSUB target not found"); return false; }
 
     if (app->gosub_sp >= 128) { runtime_error(app, current_line, "GOSUB stack overflow"); return false; }
@@ -10401,6 +10677,8 @@ static bool exec_mid_assign(App *app, Parser *p, int current_line) {
 /* ===================== Execute a single statement ===================== */
 
 static bool exec_single_statement(App *app, const char *stmt, int current_line, int cur_li, int cur_si, int *line_idx, int *stmt_idx) {
+    app->statement_uses_inkey = false;
+
     // If we just RETURNed from a GOSUB that occurred inside a ':' chain (usually inside an IF tail),
     // resume execution inside that chain instead of re-running the owning statement from the top.
     if (app->resume_chain_pending &&
@@ -10423,6 +10701,21 @@ static bool exec_single_statement(App *app, const char *stmt, int current_line, 
     char *tmp = xstrdup(stmt);
     char *s = trim(tmp);
     if (*s == 0) { free(tmp); return true; }
+
+    /* Optional symbolic label prefix: LABEL: <statement>.
+       A label-only statement (LABEL:) is a no-op anchor target. */
+    {
+        char label[128];
+        const char *after_colon = NULL;
+        if (parse_leading_label_def(s, label, sizeof(label), &after_colon)) {
+            char *rest = trim((char*)after_colon);
+            if (*rest == 0) {
+                free(tmp);
+                return true;
+            }
+            s = rest;
+        }
+    }
 
 /* Block IF markers: ELSE / END IF / ENDIF */
 if (current_line >= 0) {
@@ -11477,10 +11770,42 @@ if (resume_next && app->err_origin_in_chain && app->err_origin_chain_text) {
 app->err_origin_valid = false;
 
 *line_idx = target_idx;
-*stmt_idx = target_stmt;
-free(tmp);
-return true;
-}
+	*stmt_idx = target_stmt;
+	free(tmp);
+	return true;
+	}
+
+	// ERROR <code>  (GW-BASIC/QBASIC: raise runtime error)
+	if (starts_ci(s, "ERROR") && is_word_boundary(s[5])) {
+	    Parser p = { s + 5 };
+	    skip_ws(&p);
+
+	    double dv = 0.0;
+	    if (!parse_expr(app, &p, &dv)) {
+	        runtime_error(app, current_line, "ERROR expects error code");
+	        free(tmp);
+	        return false;
+	    }
+	    skip_ws(&p);
+	    if (*p.s != 0) {
+	        runtime_error(app, current_line, "Syntax error");
+	        free(tmp);
+	        return false;
+	    }
+
+	    int code = (int)llround(dv);
+	    if (!isfinite(dv) || fabs(dv - (double)code) > 1e-9 || code < 0) {
+	        runtime_error(app, current_line, "Illegal function call");
+	        free(tmp);
+	        return false;
+	    }
+
+	    /* Raise a runtime error and preserve the user-requested ERR code. */
+	    runtime_error(app, current_line, "User-defined error");
+	    app->last_err_code = code;
+	    free(tmp);
+	    return false;
+	}
 
 
 // ON <expr> GOTO/GOSUB <line-list>
@@ -11527,10 +11852,31 @@ return true;
     // GOTO
     if (starts_ci(s, "GOTO") && is_word_boundary(s[4])) {
         Parser p = { s + 4 };
-        double ln = 0.0;
-        if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "GOTO expects line number"); free(tmp); return false; }
-        int target = (int)llround(ln);
-        int idx = program_find_index(&app->prog, target);
+        int idx = -1;
+        const char *orig = p.s;
+        skip_ws(&p);
+        if (isalpha((unsigned char)*p.s) || *p.s == '_') {
+            const char *a = p.s;
+            while (isalnum((unsigned char)*p.s) || *p.s == '_' || *p.s == '$') p.s++;
+            const char *b = p.s;
+            const char *t = p.s;
+            while (*t == ' ' || *t == '\t') t++;
+            if (*t == 0) {
+                char lab[128];
+                size_t n = (size_t)(b - a);
+                if (n + 1 > sizeof(lab)) n = sizeof(lab) - 1;
+                for (size_t i = 0; i < n; i++) lab[i] = (char)toupper((unsigned char)a[i]);
+                lab[n] = 0;
+                idx = program_find_label_index(&app->prog, lab);
+            }
+        }
+        if (idx < 0) {
+            p.s = orig;
+            double ln = 0.0;
+            if (!parse_expr(app, &p, &ln)) { runtime_error(app, current_line, "GOTO expects line number"); free(tmp); return false; }
+            int target = (int)llround(ln);
+            idx = program_find_index(&app->prog, target);
+        }
         if (idx < 0) { runtime_error(app, current_line, "GOTO target not found"); free(tmp); return false; }
         *line_idx = idx;
         *stmt_idx = 0;
@@ -11632,6 +11978,85 @@ return true;
             free(tmp);
             return true; /* no ELSE target */
         } else {
+            /* THEN label shorthand:
+               IF X THEN LABEL
+               IF X THEN LABEL ELSE OTHER
+               QBASIC accepts this as a branch target form. Support both
+               numeric and symbolic label targets without requiring GOTO. */
+            Parser p3 = { p.s };
+            char *then_label = NULL;
+            if (parse_identifier(&p3, &then_label)) {
+                if (is_reserved_basic_keyword_ci(then_label, strlen(then_label))) {
+                    free(then_label);
+                    then_label = NULL;
+                }
+            }
+            if (then_label) {
+                skip_ws(&p3);
+                if (*p3.s == 0 || (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4]))) {
+                    if (cond) {
+                        int idx = program_find_label_index(&app->prog, then_label);
+                        if (idx >= 0) {
+                            free(then_label);
+                            *line_idx = idx;
+                            *stmt_idx = 0;
+                            free(tmp);
+                            return true;
+                        }
+                        /* Ambiguous shorthand (e.g., THEN RESUME without RESUME: label):
+                           fall through and parse as statement form. */
+                    } else {
+                        /* cond is false: optional ELSE <line#|label> */
+                        if (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4])) {
+                            p3.s += 4;
+                            skip_ws(&p3);
+
+                            Parser p4 = { p3.s };
+                            double ln2 = 0.0;
+                            if (parse_number(&p4, &ln2)) {
+                                int target = (int)llround(ln2);
+                                int idx = program_find_index(&app->prog, target);
+                                free(then_label);
+                                if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
+                                *line_idx = idx;
+                                *stmt_idx = 0;
+                                free(tmp);
+                                return true;
+                            }
+
+                            char *else_label = NULL;
+                            if (parse_identifier(&p4, &else_label)) {
+                                if (!is_reserved_basic_keyword_ci(else_label, strlen(else_label))) {
+                                    skip_ws(&p4);
+                                    if (*p4.s == 0) {
+                                        int idx = program_find_label_index(&app->prog, else_label);
+                                        free(else_label);
+                                        if (idx >= 0) {
+                                            free(then_label);
+                                            *line_idx = idx;
+                                            *stmt_idx = 0;
+                                            free(tmp);
+                                            return true;
+                                        }
+                                        /* Ambiguous ELSE shorthand with no matching label:
+                                           fall through to statement-form ELSE parsing. */
+                                    } else {
+                                        free(else_label);
+                                    }
+                                } else {
+                                    free(else_label);
+                                }
+                            }
+                        } else {
+                            free(then_label);
+                            free(tmp);
+                            return true; /* false condition with no ELSE */
+                        }
+                    }
+                }
+            }
+            free(then_label);
+
             // execute the rest as a statement (supports single-line ELSE)
             char *rest = xstrdup(p.s);
             char *rt = trim(rest);
@@ -12184,6 +12609,9 @@ static void runtime_reset(App *app) {
     app->on_key_in_progress = false;
 
     app->inkey_ready = false;
+    app->inkey_waiting = false;
+    app->inkey_wait_grace_statements = 0;
+    app->statement_uses_inkey = false;
     app->stop_flag = false;
         app->pause_flag = false;
     app->option_base = 0;
@@ -12231,6 +12659,19 @@ static void runtime_reset(App *app) {
 
 static void maybe_do_pending_load(App *app);
 
+static void finish_inkey_wait_after_statement(App *app) {
+    if (!app || app->input_waiting) return;
+    if (app->run_state != RUN_WAITING || !app->inkey_waiting) return;
+    if (app->statement_uses_inkey) return;
+    if (app->inkey_wait_grace_statements > 0) {
+        app->inkey_wait_grace_statements--;
+        return;
+    }
+    app->inkey_waiting = false;
+    app->inkey_wait_grace_statements = 0;
+    set_run_state(app, RUN_RUNNING);
+}
+
 static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool clear_output, bool reset_vars) {
     if (clear_output) {
         out_clear(app, false);
@@ -12268,18 +12709,7 @@ static void do_exec_from(App *app, int start_line_idx, int start_stmt_idx, bool 
             // Execution was interrupted (user STOP/BREAK or a deferred stop for LOAD).
 
     set_run_state(app, RUN_STOPPED);
-            {
-                int stop_line_no = -1;
-                if (line_idx >= 0 && line_idx < (int)app->prog.count) stop_line_no = app->prog.lines[line_idx].line_no;
-                else if (app->ui_last_exec_line > 0) stop_line_no = app->ui_last_exec_line;
-                char sbuf[96];
-                if (stop_line_no > 0) {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", stop_line_no);
-                } else {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
-                }
-                out_append(app, sbuf);
-            }
+            report_stopped(app, line_idx, app->ui_last_exec_line);
             // If a LOAD was requested while running, perform it now (stop -> clear output -> load -> idle).
             if (app->pending_load_path) {
                 set_run_state(app, RUN_IDLE);
@@ -12389,6 +12819,8 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
 
         stmtlist_free(&sl);
 
+        finish_inkey_wait_after_statement(app);
+
         // Interpreter-wide speed control (not just output pacing)
         exec_apply_pacing(app);
 
@@ -12405,7 +12837,9 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
         // certain error/stop paths. Ensure we leave RUNNING when a program terminates.
         // If an error/STOP already set RUN_STOPPED, keep it.
         if (!cont) {
-            if (app->run_state == RUN_RUNNING) set_run_state(app, RUN_IDLE);
+            if (app->run_state == RUN_RUNNING || (app->run_state == RUN_WAITING && !app->input_waiting)) {
+                set_run_state(app, RUN_IDLE);
+            }
     maybe_do_pending_load(app);
             return;
         }
@@ -12429,6 +12863,9 @@ static void run_apply_default_screen0(App *app) {
 }
 
 static void do_run(App *app) {
+#ifndef WBASIC_NO_UI
+    ui_ensure_output_window_visible(app);
+#endif
 
     run_apply_default_screen0(app);
 
@@ -12604,10 +13041,24 @@ static void do_new(App *app) {
 }
 
 static void do_list(App *app) {
-    // LIST should refresh/rebuild the editor contents from the current program,
-    // not dump the listing to the output pane.
-    if (!editor_to_program(app)) return;
-    program_to_editor(app);
+    if (!app) return;
+
+    // GTK editor mode: keep the editor text exactly as authored.
+    // LIST should not rewrite whitespace/blank lines/indentation in-place.
+    if (wbasic_has_ui_buffers(app)) {
+        return;
+    }
+
+    // CLI/headless mode: print current in-memory program.
+    for (size_t i = 0; i < app->prog.count; i++) {
+        if (app->prog.lines[i].had_explicit_number) {
+            const char *txt = app->prog.lines[i].text ? app->prog.lines[i].text : "";
+            if (*txt == ' ' || *txt == '\t') out_printf(app, "%d%s\n", app->prog.lines[i].line_no, txt);
+            else out_printf(app, "%d %s\n", app->prog.lines[i].line_no, txt);
+        } else {
+            out_printf(app, "%s\n", app->prog.lines[i].text ? app->prog.lines[i].text : "");
+        }
+    }
 }
 
 // Ensure a filename ends with .bas (case-insensitive). Returns newly-allocated string (g_free when done).
@@ -13003,19 +13454,81 @@ static char *renum_rewrite_text(const char *in, const int *old_nums, const int *
     return out;
 }
 
+static char *renum_rewrite_editor_text_preserve_layout(const char *src, const int *old_nums, const int *new_nums, size_t nmap) {
+    if (!src) return xstrdup("");
+    GString *out = g_string_new(NULL);
+
+    const char *line = src;
+    while (line) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl ? (size_t)(nl - line) : strlen(line);
+
+        char *buf = (char*)malloc(len + 1);
+        if (!buf) {
+            g_string_free(out, TRUE);
+            return xstrdup(src);
+        }
+        memcpy(buf, line, len);
+        buf[len] = 0;
+
+        char *p = buf;
+        while (*p == ' ' || *p == '\t') p++;
+        char *endp = NULL;
+        long ln = strtol(p, &endp, 10);
+        if (endp != p && (isspace((unsigned char)*endp) || *endp == 0)) {
+            int oldv = (int)ln;
+            int newv = renum_lookup(old_nums, new_nums, nmap, oldv);
+            if (newv < 0) newv = oldv;
+
+            g_string_append_len(out, buf, (gssize)(p - buf));
+            g_string_append_printf(out, "%d", newv);
+
+            char *rew = renum_rewrite_text(endp, old_nums, new_nums, nmap);
+            if (rew) {
+                g_string_append(out, rew);
+                free(rew);
+            }
+        } else {
+            g_string_append_len(out, buf, (gssize)len);
+        }
+
+        free(buf);
+        if (!nl) break;
+        g_string_append_c(out, '\n');
+        line = nl + 1;
+    }
+
+    return g_string_free(out, FALSE);
+}
+
 static void do_renum(App *app, int start, int step) {
     if (!app) return;
     if (start <= 0 || step <= 0) { out_append(app, "ERROR: Illegal function call\n"); return; }
 
-    if (!editor_to_program(app)) return;
+    char *editor_snapshot = NULL;
+#ifndef WBASIC_NO_UI
+    if (wbasic_has_ui_buffers(app)) editor_snapshot = editor_get_text(app->editor_buf);
+#endif
+
+#define FREE_EDITOR_SNAPSHOT() do { if (editor_snapshot) { g_free(editor_snapshot); editor_snapshot = NULL; } } while(0)
+
+    if (!editor_to_program(app)) { FREE_EDITOR_SNAPSHOT(); return; }
     Program *p = &app->prog;
-    if (p->count == 0) { out_append(app, "OK\n"); return; }
+    if (p->count == 0) { out_append(app, "OK\n"); FREE_EDITOR_SNAPSHOT(); return; }
+
+    // Non-destructive behavior for unnumbered-authored programs:
+    // if no source lines had explicit numbers, RENUM is a no-op.
+    bool any_explicit = false;
+    for (size_t i = 0; i < p->count; i++) {
+        if (p->lines[i].had_explicit_number) { any_explicit = true; break; }
+    }
+    if (!any_explicit) { out_append(app, "OK\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     // Build mapping
     size_t n = p->count;
     int *old_nums = (int*)malloc(n * sizeof(int));
     int *new_nums = (int*)malloc(n * sizeof(int));
-    if (!old_nums || !new_nums) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); return; }
+    if (!old_nums || !new_nums) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     int cur = start;
     for (size_t i=0;i<n;i++) {
@@ -13026,11 +13539,13 @@ static void do_renum(App *app, int start, int step) {
 
     // Rewrite line texts with updated targets
     Line *new_lines = (Line*)calloc(n, sizeof(Line));
-    if (!new_lines) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); return; }
+    if (!new_lines) { free(old_nums); free(new_nums); out_append(app, "ERROR: Out of memory\n"); FREE_EDITOR_SNAPSHOT(); return; }
 
     for (size_t i=0;i<n;i++) {
         new_lines[i].line_no = new_nums[i];
         new_lines[i].text = renum_rewrite_text(p->lines[i].text, old_nums, new_nums, n);
+        new_lines[i].had_explicit_number = true;
+        new_lines[i].source_editor_line_idx = -1;
         if (!new_lines[i].text) new_lines[i].text = xstrdup("");
     }
 
@@ -13040,11 +13555,25 @@ static void do_renum(App *app, int start, int step) {
     p->count = n;
     p->cap = n;
 
-    program_to_editor(app);
+#ifndef WBASIC_NO_UI
+    if (wbasic_has_ui_buffers(app) && editor_snapshot) {
+        char *rewritten = renum_rewrite_editor_text_preserve_layout(editor_snapshot, old_nums, new_nums, n);
+        app->suppress_dirty = true;
+        editor_set_text(app->editor_buf, rewritten ? rewritten : "");
+        app->suppress_dirty = false;
+        g_free(rewritten);
+        g_free(editor_snapshot);
+    } else
+#endif
+    {
+        program_to_editor(app);
+    }
 
     free(old_nums);
     free(new_nums);
     out_append(app, "OK\n");
+
+#undef FREE_EDITOR_SNAPSHOT
 }
 static void do_immediate(App *app, const char *cmdline) {
     app->exec_cursor_valid = false;
@@ -13103,16 +13632,7 @@ static void do_immediate(App *app, const char *cmdline) {
             app->stop_flag = true;
 
     set_run_state(app, RUN_STOPPED);
-            {
-                int stop_line_no = (app->ui_last_exec_line > 0) ? app->ui_last_exec_line : -1;
-                char sbuf[96];
-                if (stop_line_no > 0) {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED AT LINE %d ****\n", stop_line_no);
-                } else {
-                    snprintf(sbuf, sizeof(sbuf), "\n**** STOPPED ****\n");
-                }
-                out_append(app, sbuf);
-            }
+            report_stopped(app, -1, app->ui_last_exec_line);
         } else {
             out_append(app, "OK\n");
         }
@@ -13223,6 +13743,7 @@ static void do_immediate(App *app, const char *cmdline) {
         int nsi = si + 1;
 
         bool cont = exec_single_statement(app, sl.stmts[si], -1, -1, -1, &nli, &nsi);
+        finish_inkey_wait_after_statement(app);
         if (!cont) break;
 
         if (nli != 0) {
@@ -13709,35 +14230,39 @@ gtk_box_pack_start(GTK_BOX(rv), l3, FALSE, FALSE, 0);
 
 #ifndef WBASIC_NO_UI
 static gboolean on_win_configure(GtkWidget *w, GdkEvent *event, gpointer user_data) {
-    (void)w;
-    (void)event;
     App *app = (App*)user_data;
     if (!app) return FALSE;
 
-    // Track window size continuously so we can restore it reliably.
-    // Some window managers may report "maximized" early; we still record the
-    // last known size so it persists across restarts.
-    if (app->win) {
-        int ww = 0, wh = 0;
-        if (event && event->type == GDK_CONFIGURE) {
-            GdkEventConfigure *ce = (GdkEventConfigure*)event;
-            ww = ce->width; wh = ce->height;
+    bool is_output = (w == app->output_win);
+    int ww = 0, wh = 0;
+    if (event && event->type == GDK_CONFIGURE) {
+        GdkEventConfigure *ce = (GdkEventConfigure*)event;
+        ww = ce->width;
+        wh = ce->height;
+    } else if (w) {
+        gtk_window_get_size(GTK_WINDOW(w), &ww, &wh);
+    }
+    if (ww > 0 && wh > 0) {
+        if (is_output) {
+            app->have_output_win_size = true;
+            app->output_win_w = ww;
+            app->output_win_h = wh;
         } else {
-            gtk_window_get_size(GTK_WINDOW(w), &ww, &wh);
-        }
-        if (ww > 0 && wh > 0) {
             app->have_win_size = true;
             app->win_w = ww;
             app->win_h = wh;
         }
-        // Track window position as well (x/y in root window coordinates).
-        // We only update when GTK provides configure-event coordinates.
-        if (event && event->type == GDK_CONFIGURE) {
-            GdkEventConfigure *ce2 = (GdkEventConfigure*)event;
-            int wx = ce2->x;
-            int wy = ce2->y;
-            // Some WMs may report extreme negative values when minimized; ignore those.
-            if (wx > -10000 && wx < 100000 && wy > -10000 && wy < 100000) {
+    }
+    if (event && event->type == GDK_CONFIGURE) {
+        GdkEventConfigure *ce = (GdkEventConfigure*)event;
+        int wx = ce->x;
+        int wy = ce->y;
+        if (wx > -10000 && wx < 100000 && wy > -10000 && wy < 100000) {
+            if (is_output) {
+                app->have_output_win_pos = true;
+                app->output_win_x = wx;
+                app->output_win_y = wy;
+            } else {
                 app->have_win_pos = true;
                 app->win_x = wx;
                 app->win_y = wy;
@@ -13753,31 +14278,58 @@ static gboolean on_win_configure(GtkWidget *w, GdkEvent *event, gpointer user_da
 
 #ifndef WBASIC_NO_UI
 static void on_win_size_allocate(GtkWidget *w, GtkAllocation *alloc, gpointer user_data) {
-    (void)w;
     App *app = (App*)user_data;
     if (!app || !alloc) return;
 
-    // Fires reliably; use it to persist last known window size.
     if (alloc->width > 0 && alloc->height > 0) {
-        app->have_win_size = true;
-        app->win_w = alloc->width;
-        app->win_h = alloc->height;
+        if (w == app->output_win) {
+            app->have_output_win_size = true;
+            app->output_win_w = alloc->width;
+            app->output_win_h = alloc->height;
+        } else {
+            app->have_win_size = true;
+            app->win_w = alloc->width;
+            app->win_h = alloc->height;
+        }
     }
 }
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
 static gboolean on_win_delete(GtkWidget *w, GdkEvent *event, gpointer user_data) {
-    (void)w;
     (void)event;
     App *app = (App*)user_data;
     if (!app) return FALSE;
+
+    if (w == app->output_win) {
+        if (app->embedded_ui_export) {
+            app->quitting = true;
+            app->stop_flag = true;
+            prefs_save(app);
+            if (app->win && GTK_IS_WIDGET(app->win)) {
+                gtk_widget_destroy(app->win);
+                app->win = NULL;
+            }
+            return FALSE;
+        }
+        if (app->run_state == RUN_RUNNING || app->run_state == RUN_WAITING || app->run_state == RUN_PAUSED) {
+            do_stop(app);
+        }
+        prefs_save(app);
+        gtk_widget_hide(w);
+        return TRUE;
+    }
+
+    if (app->quitting) return FALSE;
     if (!ui_confirm_save_if_dirty(app)) {
         return TRUE; /* cancel close */
     }
     app->quitting = true;
     app->stop_flag = true;
-    if (app->paned) { app->have_paned_pos = true; app->paned_pos = gtk_paned_get_position(GTK_PANED(app->paned)); }
+    if (app->output_win && GTK_IS_WIDGET(app->output_win)) {
+        gtk_widget_destroy(app->output_win);
+        app->output_win = NULL;
+    }
     prefs_save(app);
     return FALSE; /* allow close */
 }
@@ -13786,26 +14338,23 @@ static gboolean on_win_delete(GtkWidget *w, GdkEvent *event, gpointer user_data)
 
 #ifndef WBASIC_NO_UI
 static void on_win_destroy(GtkWidget *w, gpointer user_data) {
-    (void)w;
     App *app = (App*)user_data;
-    if (app) {
-        /* Ensure interpreter loops stop touching GTK after teardown begins. */
-        app->quitting = true;
-        app->stop_flag = true;
-        app->ui_destroyed = true;
-        /* Null out widget pointers so any late-running code can safely bail. */
-        app->win = NULL;
-        app->cmd_entry = NULL;
-        app->editor_view = NULL;
-        app->output_view = NULL;
-        app->status_led = NULL;
-        app->status_label = NULL;
+    if (!app) return;
+
+    if (w == app->output_win) {
+        app->output_win = NULL;
+        return;
     }
-    // Save prefs on final teardown (window size already tracked during runtime).
-    if (app && app->paned) {
-        app->have_paned_pos = true;
-        app->paned_pos = gtk_paned_get_position(GTK_PANED(app->paned));
-    }
+
+    app->quitting = true;
+    app->stop_flag = true;
+    app->ui_destroyed = true;
+    app->win = NULL;
+    app->cmd_entry = NULL;
+    app->editor_view = NULL;
+    app->output_view = NULL;
+    app->status_led = NULL;
+    app->status_label = NULL;
 
     prefs_save(app);
     gtk_main_quit();
@@ -14170,6 +14719,7 @@ static GtkWidget *make_scrolled_text_view(GtkTextBuffer **out_buf, GtkWidget **o
     (void)monospace;
 
     if (!editable) {
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), FALSE);
         gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv), GTK_WRAP_WORD_CHAR);
         g_object_set_data(G_OBJECT(buf), "xbasic_output_view", tv);
     }
@@ -14206,23 +14756,57 @@ static GtkWidget *make_scrolled_editor_view(GtkTextBuffer **out_buf, GtkWidget *
 #ifndef WBASIC_NO_UI
 static gboolean on_cmd_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data);
 static gboolean on_win_key_press(GtkWidget *w, GdkEventKey *e, gpointer user_data);
-
+static void ui_ensure_output_window_visible(App *app);
 static void update_window_title(App *app)
 {
-    if (!app || !app->win) return;
+    if (!app) return;
 
     const char *disp = "Untitled";
     gchar *base = NULL;
+    gchar *embedded_title = NULL;
 
     if (app->current_path && *app->current_path) {
         base = g_path_get_basename(app->current_path);
         if (base && *base) disp = base;
     }
 
-    gchar *title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
-    gtk_window_set_title(GTK_WINDOW(app->win), title);
-    g_free(title);
+    if (app->embedded_ui_export && disp && *disp) {
+        embedded_title = g_strdup(disp);
+        if (embedded_title) {
+            char *dot = strrchr(embedded_title, '.');
+            if (dot && dot != embedded_title) *dot = '\0';
+            if (*embedded_title) disp = embedded_title;
+        }
+    }
+
+    gchar *editor_title = NULL;
+    if (app->embedded_ui_export) {
+        editor_title = g_strdup(disp);
+    } else {
+        editor_title = g_strdup_printf("%s%s - Wally's Basic", disp, (app->dirty ? "*" : ""));
+    }
+    if (app->win) gtk_window_set_title(GTK_WINDOW(app->win), editor_title);
+    g_free(editor_title);
+
+    if (app->output_win) {
+        gchar *output_title = NULL;
+        if (app->embedded_ui_export) {
+            output_title = g_strdup(disp);
+        } else {
+            output_title = g_strdup_printf("Output: %s - Wally's Basic", disp);
+        }
+        gtk_window_set_title(GTK_WINDOW(app->output_win), output_title);
+        g_free(output_title);
+    }
+    if (embedded_title) g_free(embedded_title);
     if (base) g_free(base);
+}
+
+static void ui_ensure_output_window_visible(App *app)
+{
+    if (!app || !app->output_win || app->ui_destroyed) return;
+    if (!gtk_widget_get_visible(app->output_win)) gtk_widget_show_all(app->output_win);
+    update_window_title(app);
 }
 #endif /* !WBASIC_NO_UI */
 #endif /* !WBASIC_NO_UI */
@@ -14367,10 +14951,17 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
 static void build_ui(App *app) {
     app->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     attach_windows_dark_titlebar(app->win);
-    // Window title is driven by current filename
     update_window_title(app);
 
-    // Keyboard accelerators
+    app->output_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    attach_windows_dark_titlebar(app->output_win);
+    if (app->embedded_ui_export) {
+        update_window_title(app);
+    } else {
+        gtk_window_set_title(GTK_WINDOW(app->output_win), "Program Output - Wally's Basic");
+    }
+    gtk_window_set_transient_for(GTK_WINDOW(app->output_win), GTK_WINDOW(app->win));
+
     app->accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(app->win), app->accel);
     if (app->have_win_size && app->win_w > 0 && app->win_h > 0) {
@@ -14378,48 +14969,33 @@ static void build_ui(App *app) {
     } else {
         gtk_window_set_default_size(GTK_WINDOW(app->win), 980, 720);
     }
+    if (app->have_output_win_size && app->output_win_w > 0 && app->output_win_h > 0) {
+        gtk_window_set_default_size(GTK_WINDOW(app->output_win), app->output_win_w, app->output_win_h);
+    } else {
+        gtk_window_set_default_size(GTK_WINDOW(app->output_win), 760, 420);
+    }
 
-    // Restore window position (best-effort). Must be done before the window is shown.
     if (app->have_win_pos) {
         gtk_window_move(GTK_WINDOW(app->win), app->win_x, app->win_y);
     }
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_container_add(GTK_CONTAINER(app->win), vbox);
-
-    gtk_box_pack_start(GTK_BOX(vbox), make_menu_bar(app), FALSE, FALSE, 0);
-
-    app->paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
-    GtkWidget *paned = app->paned;
-
-    /* Experiment: make editor/output divider wider */
-    gtk_paned_set_wide_handle(GTK_PANED(paned), TRUE);
-    
-
-    /* Make paned handle ~50% thicker */
-    {
-        GtkCssProvider *prov = gtk_css_provider_new();
-        gtk_css_provider_load_from_data(prov,
-            "paned > separator { min-width: 12px; min-height: 12px; }",
-            -1, NULL);
-        gtk_style_context_add_provider_for_screen(
-            gdk_screen_get_default(),
-            GTK_STYLE_PROVIDER(prov),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-        g_object_unref(prov);
+    if (app->have_output_win_pos) {
+        gtk_window_move(GTK_WINDOW(app->output_win), app->output_win_x, app->output_win_y);
+    } else if (app->have_win_pos) {
+        gtk_window_move(GTK_WINDOW(app->output_win), app->win_x + 80, app->win_y + 80);
     }
-gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
+
+    GtkWidget *editor_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(app->win), editor_vbox);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), make_menu_bar(app), FALSE, FALSE, 0);
 
     GtkWidget *editor_sw = make_scrolled_editor_view(&app->editor_buf, &app->editor_view);
-    // Plain GtkTextView editor: provide WBASIC undo/redo via lightweight snapshot stack.
     app->editor_undo = undo_stack_new_for_buffer(app->editor_buf);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buffer_changed), app);
     g_signal_connect(app->editor_buf, "changed", G_CALLBACK(on_editor_buf_changed), app);
-    gtk_paned_pack1(GTK_PANED(paned), editor_sw, TRUE, FALSE);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), editor_sw, TRUE, TRUE, 0);
 
     app->output_sw = make_scrolled_text_view(&app->output_buf, &app->output_view, false, true);
 
-    /* Pane "border": add internal padding so text never prints flush to the edge.
-       Use the same thickness as the paned separator (~12px). */
     gtk_text_view_set_left_margin(GTK_TEXT_VIEW(app->editor_view), 12);
     gtk_text_view_set_right_margin(GTK_TEXT_VIEW(app->editor_view), 12);
     gtk_text_view_set_top_margin(GTK_TEXT_VIEW(app->editor_view), 12);
@@ -14429,8 +15005,7 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     gtk_text_view_set_right_margin(GTK_TEXT_VIEW(app->output_view), 12);
     gtk_text_view_set_top_margin(GTK_TEXT_VIEW(app->output_view), 12);
     gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(app->output_view), 12);
-    /* Initialize optimized output scrollback (GTK).
-       We keep transcript scrollback lines above a stable mark, and re-render the current screen below it. */
+
     app->out_scrollback_lines = 0;
     app->out_scrollback_max_lines = 1000;
     if (app->output_buf) {
@@ -14438,20 +15013,21 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
         gtk_text_buffer_get_start_iter(app->output_buf, &it0);
         GtkTextMark *m = gtk_text_buffer_get_mark(app->output_buf, "out_screen_start");
         if (!m) {
-            m = gtk_text_buffer_create_mark(app->output_buf, "out_screen_start", &it0, TRUE /* left gravity: keep screen boundary */);
+            m = gtk_text_buffer_create_mark(app->output_buf, "out_screen_start", &it0, TRUE);
         } else {
             gtk_text_buffer_move_mark(app->output_buf, m, &it0);
         }
         app->out_screen_start_mark = m;
     }
 
-
-    // Names used by CSS theming
     if (app->editor_view) gtk_widget_set_name(app->editor_view, "wbasic_editor");
     if (app->output_view) gtk_widget_set_name(app->output_view, "wbasic_output");
 
-    // Apply saved theme (colors + font) now that views are named
     apply_theme(app);
+
+    GtkWidget *output_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(app->output_win), output_vbox);
+
     app->output_stack = gtk_stack_new();
     gtk_stack_set_transition_type(GTK_STACK(app->output_stack), GTK_STACK_TRANSITION_TYPE_NONE);
     gtk_stack_add_named(GTK_STACK(app->output_stack), app->output_sw, "text");
@@ -14464,21 +15040,19 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     gtk_stack_add_named(GTK_STACK(app->output_stack), app->gfx_area, "gfx");
 
     ui_update_output_mode(app);
-    gtk_paned_pack2(GTK_PANED(paned), app->output_stack, TRUE, FALSE);
-    if (app->have_paned_pos && app->paned_pos > 0) gtk_paned_set_position(GTK_PANED(paned), app->paned_pos);
+    gtk_box_pack_start(GTK_BOX(output_vbox), app->output_stack, TRUE, TRUE, 0);
 
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 8);
+    gtk_box_pack_start(GTK_BOX(editor_vbox), hbox, FALSE, FALSE, 8);
     gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new("Command:"), FALSE, FALSE, 8);
     app->cmd_entry = gtk_entry_new();
     gtk_box_pack_start(GTK_BOX(hbox), app->cmd_entry, TRUE, TRUE, 8);
 
-    // Status indicator (text + LED) in lower-right corner
     GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_set_halign(status_box, GTK_ALIGN_END);
 
     app->status_label = gtk_label_new("Idle");
-    gtk_label_set_xalign(GTK_LABEL(app->status_label), 1.0); // right-justify text within label
+    gtk_label_set_xalign(GTK_LABEL(app->status_label), 1.0);
     gtk_widget_set_halign(app->status_label, GTK_ALIGN_END);
 
     app->status_led = gtk_drawing_area_new();
@@ -14488,7 +15062,6 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
 
     app->run_state = RUN_IDLE;
 
-    // Pack label to the left, LED to the far right (corner)
     gtk_box_pack_start(GTK_BOX(status_box), app->status_label, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(status_box), app->status_led, FALSE, FALSE, 0);
 
@@ -14499,7 +15072,6 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->cmd_entry, "focus-in-event", G_CALLBACK(on_cmd_focus_in), app);
     g_signal_connect(app->cmd_entry, "focus-out-event", G_CALLBACK(on_cmd_focus_out), app);
 
-    // Start with no BASIC program in memory
     editor_set_text(app->editor_buf, "");
 
     g_signal_connect(app->win, "delete-event", G_CALLBACK(on_win_delete), app);
@@ -14507,17 +15079,15 @@ gtk_box_pack_start(GTK_BOX(vbox), paned, TRUE, TRUE, 0);
     g_signal_connect(app->win, "size-allocate", G_CALLBACK(on_win_size_allocate), app);
     g_signal_connect(app->win, "configure-event", G_CALLBACK(on_win_configure), app);
     g_signal_connect(app->win, "destroy", G_CALLBACK(on_win_destroy), app);
+
+    g_signal_connect(app->output_win, "delete-event", G_CALLBACK(on_win_delete), app);
+    g_signal_connect(app->output_win, "key-press-event", G_CALLBACK(on_win_key_press), app);
+    g_signal_connect(app->output_win, "size-allocate", G_CALLBACK(on_win_size_allocate), app);
+    g_signal_connect(app->output_win, "configure-event", G_CALLBACK(on_win_configure), app);
+    g_signal_connect(app->output_win, "destroy", G_CALLBACK(on_win_destroy), app);
 }
-#endif /* !WBASIC_NO_UI */
 
 
-
-/* ===================== TRUE Option C export support ===================== */
-
-static void free_key(gpointer data);
-static void free_val(gpointer data);
-
-#ifndef WBASIC_NO_UI
 static WB_UNUSED char *get_editor_text_dup(App *app) {
     if (!app || !app->editor_buf) return NULL;
     GtkTextIter a, b;
@@ -14528,6 +15098,9 @@ static WB_UNUSED char *get_editor_text_dup(App *app) {
 #else
 static WB_UNUSED char *get_editor_text_dup(App *app) { (void)app; return NULL; }
 #endif /* WBASIC_NO_UI */
+
+static void free_key(gpointer data);
+static void free_val(gpointer data);
 
 /* deleted unused static function: c_emit_escaped */
 
@@ -14545,9 +15118,83 @@ static void c_emit_escaped_len(FILE *fp, const char *s, size_t n) {
     }
 }
 
+typedef enum ExportRuntimeKind {
+    EXPORT_RUNTIME_HEADLESS = 0,
+    EXPORT_RUNTIME_GTK = 1
+} ExportRuntimeKind;
+
+static bool export_scan_match_word_ci(const char *s, const char *word) {
+    if (!s || !word) return false;
+    size_t n = strlen(word);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char a = (unsigned char)s[i];
+        unsigned char b = (unsigned char)word[i];
+        if (!a || toupper(a) != toupper(b)) return false;
+    }
+    return true;
+}
+
+static ExportRuntimeKind classify_export_runtime(const char *bas_text) {
+    if (!bas_text) return EXPORT_RUNTIME_HEADLESS;
+
+    const char *p = bas_text;
+    while (*p) {
+        unsigned char ch = (unsigned char)*p;
+
+        if (ch == '"') {
+            p++;
+            while (*p) {
+                if (*p == '"') {
+                    p++;
+                    break;
+                }
+                p++;
+            }
+            continue;
+        }
+
+        if (ch == '\'') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+
+        if (isalpha(ch)) {
+            if (export_scan_match_word_ci(p, "REM") &&
+                !isalnum((unsigned char)p[3]) && p[3] != '$' && p[3] != '_') {
+                while (*p && *p != '\n') p++;
+                continue;
+            }
+
+            if (export_scan_match_word_ci(p, "SCREEN") &&
+                !isalnum((unsigned char)p[6]) && p[6] != '$' && p[6] != '_') {
+                const char *q = p + 6;
+                while (*q == ' ' || *q == '\t') q++;
+
+                if (*q == '\0' || *q == '\n') return EXPORT_RUNTIME_GTK;
+
+                char *endptr = NULL;
+                double mode = strtod(q, &endptr);
+                if (endptr == q) return EXPORT_RUNTIME_GTK;
+                if (mode != 0.0) return EXPORT_RUNTIME_GTK;
+                p = endptr;
+                continue;
+            }
+
+            while (isalnum((unsigned char)*p) || *p == '$' || *p == '_') p++;
+            continue;
+        }
+
+        p++;
+    }
+
+    return EXPORT_RUNTIME_HEADLESS;
+}
+
 static WB_UNUSED int export_standalone_from_text(const char *bas_text, const char *out_exe, int embed_speed_0_100, bool embed_include_speed, char **out_buildlog) {
     if (out_buildlog) *out_buildlog = NULL;
     if (!bas_text || !out_exe) return 1;
+
+    ExportRuntimeKind runtime_kind = classify_export_runtime(bas_text);
 
     char stub_path[4096];
     snprintf(stub_path, sizeof(stub_path), "%s_export.c", out_exe);
@@ -14555,9 +15202,13 @@ static WB_UNUSED int export_standalone_from_text(const char *bas_text, const cha
     FILE *fp = fopen(stub_path, "wb");
     if (!fp) return 1;
 
-    /* Exported program runs headless by default (no window). */
+    /* Exported program defaults to headless unless source scanning finds graphics SCREEN usage. */
     fprintf(fp, "#define WBASIC_EMBEDDED_BUILD 1\n");
-    fprintf(fp, "#define WBASIC_NO_UI 1\n");
+    if (runtime_kind == EXPORT_RUNTIME_HEADLESS) {
+        fprintf(fp, "#define WBASIC_NO_UI 1\n");
+    } else {
+        fprintf(fp, "#define WBASIC_FORCE_UI 1\n");
+    }
 
     if (embed_include_speed) {
         if (embed_speed_0_100 < 0) embed_speed_0_100 = 0;
@@ -14750,6 +15401,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.key_trap_enabled = true;
     app.on_key_pending = -1;
     app.on_key_in_progress = false;
+    app.embedded_ui_export = true;
     app.current_path = NULL;
     app.dirty = false;
     app.suppress_dirty = false;
@@ -14785,25 +15437,21 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     app.have_last_rnd = false;
     prefs_load(&app);
     recent_load(&app);
+    app.show_splash = false;
+    if (argc > 0 && argv && argv[0] && *argv[0]) set_current_path(&app, argv[0]);
     program_init(&app.prog);
     app.vars = g_hash_table_new_full(g_str_hash, g_str_equal, free_key, free_val);
 
     build_ui(&app);
-    gtk_widget_show_all(app.win);
-
-    if (app.show_splash) {
-        g_idle_add(ui_splash_show_idle, &app);
-    }
 
     app.suppress_dirty = true;
     editor_set_text(app.editor_buf, source_text ? source_text : "");
     app.suppress_dirty = false;
 
-    if (app.show_splash) {
-        app.deferred_autorun = true;
-    } else {
-        do_run(&app);
-    }
+    if (app.win) gtk_widget_hide(app.win);
+    if (app.output_win) gtk_widget_show_all(app.output_win);
+    update_window_title(&app);
+    do_run(&app);
  gtk_main();
 
     runtime_reset(&app);
@@ -15308,6 +15956,9 @@ if (app->key_trap_enabled && !(app->run_state == RUN_WAITING && app->input_waiti
     if (app->run_state == RUN_WAITING && app->input_waiting) {
         if (e->keyval == GDK_KEY_Escape) {
             do_stop(app);
+            return TRUE;
+        }
+        if (w != app->win && cmd_entry_forward_runtime_input_key(app, e)) {
             return TRUE;
         }
         return FALSE; /* let the GtkEntry receive the keystroke */
