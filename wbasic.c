@@ -11954,6 +11954,12 @@ return true;
             Parser p3 = { p.s };
             char *then_label = NULL;
             if (parse_identifier(&p3, &then_label)) {
+                if (is_reserved_basic_keyword_ci(then_label, strlen(then_label))) {
+                    free(then_label);
+                    then_label = NULL;
+                }
+            }
+            if (then_label) {
                 skip_ws(&p3);
                 if (*p3.s == 0 || (starts_ci(p3.s, "ELSE") && is_word_boundary(p3.s[4]))) {
                     if (cond) {
@@ -11986,16 +11992,18 @@ return true;
 
                         char *else_label = NULL;
                         if (parse_identifier(&p4, &else_label)) {
-                            skip_ws(&p4);
-                            if (*p4.s == 0) {
-                                int idx = program_find_label_index(&app->prog, else_label);
-                                free(else_label);
-                                free(then_label);
-                                if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
-                                *line_idx = idx;
-                                *stmt_idx = 0;
-                                free(tmp);
-                                return true;
+                            if (!is_reserved_basic_keyword_ci(else_label, strlen(else_label))) {
+                                skip_ws(&p4);
+                                if (*p4.s == 0) {
+                                    int idx = program_find_label_index(&app->prog, else_label);
+                                    free(else_label);
+                                    free(then_label);
+                                    if (idx < 0) { runtime_error(app, current_line, "ELSE target not found"); free(tmp); return false; }
+                                    *line_idx = idx;
+                                    *stmt_idx = 0;
+                                    free(tmp);
+                                    return true;
+                                }
                             }
                             free(else_label);
                         }
