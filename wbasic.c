@@ -14670,6 +14670,7 @@ static GtkWidget *make_scrolled_text_view(GtkTextBuffer **out_buf, GtkWidget **o
     (void)monospace;
 
     if (!editable) {
+        gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), FALSE);
         gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv), GTK_WRAP_WORD_CHAR);
         g_object_set_data(G_OBJECT(buf), "xbasic_output_view", tv);
     }

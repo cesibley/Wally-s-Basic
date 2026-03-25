@@ -16,6 +16,10 @@
   - README now notes that the GTK UI uses separate editor and output windows.
   - README now documents that the output window is shown automatically and that editor/output window geometry is persisted independently.
 
+- Documented mixed source-format authoring support in project docs.
+  - README now calls out support for BASIC source without line numbers (auto-numbered on ingest).
+  - README now explicitly documents that QBasic-style label targets are enabled by default.
+
 ## [V2.0] – March 21, 2026
 
 - Versioned the release as V2.0 across the project documentation and UI.
