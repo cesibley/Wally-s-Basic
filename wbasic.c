@@ -36,11 +36,11 @@ extern const unsigned char _binary_icon_png_end[]   __attribute__((weak));
 #define WB_UNUSED
 #endif
 #define WBASIC_VERSION_MAJOR 2
-#define WBASIC_VERSION_MINOR 0
+#define WBASIC_VERSION_MINOR 3
 #define WBASIC_VERSION_PATCH_STR ""
-#define WBASIC_VERSION_STR "2.0"
-#define WBASIC_BASELINE_DATE "2026-03-21"
-#define WBASIC_BASELINE_REV "2026-03-21 v2.0"
+#define WBASIC_VERSION_STR "2.3"
+#define WBASIC_BASELINE_DATE "2026-03-26"
+#define WBASIC_BASELINE_REV "2026-03-26 v2.3"
 #define WBASIC_SOURCE_FILE __FILE__
 
 // Wally's Basic.c - MS-BASIC-ish interpreter with GTK3 desktop UI + menus (single-file)
@@ -14163,13 +14163,31 @@ static void on_menu_paste(GtkMenuItem *mi, gpointer user_data) { (void)mi; do_ed
 
 #endif /* !WBASIC_NO_UI */
 #ifndef WBASIC_NO_UI
+static char *ui_format_today_date(void) {
+    time_t t = time(NULL);
+    struct tm lt;
+    memset(&lt, 0, sizeof(lt));
+#if defined(_WIN32)
+    localtime_s(&lt, &t);
+#else
+    localtime_r(&t, &lt);
+#endif
+    char month[32];
+    if (strftime(month, sizeof(month), "%B", &lt) == 0) {
+        return g_strdup("Unknown date");
+    }
+    return g_strdup_printf("%s %d, %d", month, lt.tm_mday, lt.tm_year + 1900);
+}
+#endif /* !WBASIC_NO_UI */
+
+#ifndef WBASIC_NO_UI
 static void on_menu_about(GtkMenuItem *mi, gpointer user_data) {
     (void)mi;
     App *app = (App*)user_data;
 
 /* About text (V1.07) */
 const char *about_line2 = "Version V" WBASIC_VERSION_STR;
-const char *about_line3 = "March 21, 2026";
+char *about_line3 = ui_format_today_date();
 
 /* Custom About dialog (non-deprecated APIs) */
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
@@ -14222,6 +14240,7 @@ gtk_box_pack_start(GTK_BOX(rv), l3, FALSE, FALSE, 0);
     gtk_widget_destroy(dlg);
 
     if (logo) g_object_unref(logo);
+    g_free(about_line3);
 
 
 }
@@ -14932,9 +14951,11 @@ static gboolean ui_splash_show_idle(gpointer user_data) {
     gtk_widget_set_halign(version_lbl, GTK_ALIGN_CENTER);
     gtk_box_pack_start(GTK_BOX(v), version_lbl, FALSE, FALSE, 0);
 
-    GtkWidget *date_lbl = gtk_label_new("March 21, 2026");
+    char *today_str = ui_format_today_date();
+    GtkWidget *date_lbl = gtk_label_new(today_str);
     gtk_widget_set_halign(date_lbl, GTK_ALIGN_CENTER);
     gtk_box_pack_start(GTK_BOX(v), date_lbl, FALSE, FALSE, 0);
+    g_free(today_str);
 
     gtk_widget_add_events(dlg, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK);
     g_signal_connect(dlg, "key-press-event", G_CALLBACK(ui_splash_on_key), app);
