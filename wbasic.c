@@ -897,6 +897,29 @@ static bool video_mode_is_graphics(WbVideoMode mode) {
     return mode != WB_VIDEO_TEXT;
 }
 
+static int gfx_mode_pixel_mask_for_mode(WbVideoMode mode) {
+    if (mode == WB_VIDEO_GFX1 || mode == WB_VIDEO_GFX10) return 0x03;
+    if (mode == WB_VIDEO_GFX2 || mode == WB_VIDEO_GFX11) return 0x01;
+    if (mode == WB_VIDEO_GFX13) return 0xFF;
+    return 0x0F;
+}
+
+static int gfx_default_fg_color_for_mode(WbVideoMode mode, int cur_fg) {
+    int pmask = gfx_mode_pixel_mask_for_mode(mode);
+    int c = cur_fg;
+    if (c < 0) return pmask;
+    if (c > pmask) return pmask;
+    return c;
+}
+
+static int gfx_default_bg_color_for_mode(WbVideoMode mode, int cur_bg) {
+    int pmask = gfx_mode_pixel_mask_for_mode(mode);
+    int c = cur_bg;
+    if (c < 0) return 0;
+    if (c > pmask) return 0;
+    return c;
+}
+
 static const ScreenModeSpec *screen_mode_spec_find(int mode) {
     for (size_t i = 0; i < (sizeof(k_screen_mode_specs) / sizeof(k_screen_mode_specs[0])); i++) {
         if (k_screen_mode_specs[i].mode == mode) {
@@ -1067,6 +1090,7 @@ int gfx_draw_x;
 int gfx_draw_y;
 int gfx_draw_scale; /* DRAW scale multiplier (GW-BASIC compatibility) */
 int gfx_draw_angle; /* DRAW angle quadrant 0..3 */
+int gfx_cga_palette; /* SCREEN 1 palette select: 0=green/red/brown, 1=cyan/magenta/white */
 
 /* Text mode COLOR state (0-15) */
 int cur_fg;   /* foreground */
@@ -1113,6 +1137,8 @@ guint screen_render_idle_id;
 
     // variable table (uppercase keys)
     GHashTable *vars; // key: gchar* (owned), value: Var*
+    int mem_seg; /* DEF SEG segment for PEEK/POKE emulation */
+    GHashTable *mem_poke_overrides; /* key: seg:off packed as guint32, value: byte 0..255 */
 
     /* DEF FN call stack (recursion guard) */
     const char *fn_call_stack[32];
@@ -1165,6 +1191,7 @@ GosubFrame gosub_stack[128];
     bool in_error_handler;           /* prevent recursive trapping until control leaves handler */
     int last_err_line;               /* ERL-like: line number where last error occurred */
     int last_err_code;               /* ERR-like: numeric code (coarse) */
+    char last_err_msg[160];          /* diagnostic text for most recent runtime error */
 
     /* Phase 0 (RESUME groundwork): capture exact execution cursor at time of error.
        This preserves WBASIC's (line_idx, stmt_idx) model so future RESUME can be correct
@@ -1972,14 +1999,16 @@ static bool gfx_alloc(App *app, int w, int h) {
 static void gfx_clear(App *app, unsigned char color_idx) {
     if (!app || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) return;
     size_t n = (size_t)app->gfx_width * (size_t)app->gfx_height;
-    memset(app->gfx_pixels, (int)(color_idx & 0x0F), n);
+    int pmask = gfx_mode_pixel_mask_for_mode(app->video_mode);
+    memset(app->gfx_pixels, (int)(color_idx & pmask), n);
 }
 
 static void gfx_draw_reset_defaults(App *app) {
     if (!app) return;
     app->gfx_draw_x = (app->gfx_width > 0) ? (app->gfx_width / 2) : 0;
     app->gfx_draw_y = (app->gfx_height > 0) ? (app->gfx_height / 2) : 0;
-    app->gfx_draw_scale = 1;
+    /* GW-BASIC DRAW uses quarter-units; scale 4 == 1x. */
+    app->gfx_draw_scale = 4;
     app->gfx_draw_angle = 0;
 }
 
@@ -1987,7 +2016,8 @@ static bool gfx_pset(App *app, int x, int y, int color_idx) {
     if (!app || !app->gfx_pixels) return false;
     if (x < 0 || y < 0 || x >= app->gfx_width || y >= app->gfx_height) return true;
     size_t idx = (size_t)y * (size_t)app->gfx_width + (size_t)x;
-    app->gfx_pixels[idx] = (unsigned char)(color_idx & 0x0F);
+    int pmask = gfx_mode_pixel_mask_for_mode(app->video_mode);
+    app->gfx_pixels[idx] = (unsigned char)(color_idx & pmask);
     return true;
 }
 
@@ -2402,6 +2432,62 @@ static const unsigned char vga16_rgb[16][3] = {
 };
 
 #ifndef WBASIC_NO_UI
+static gunichar screen_cp437_to_unicode(unsigned char ch) {
+    if (ch < 0x80) return (gunichar)ch;
+    switch (ch) {
+        /* Box/line drawing glyphs used by classic IBM BASIC splash screens. */
+        case 0xB3: return 0x2502; /* │ */
+        case 0xB8: return 0x2555; /* ╕ */
+        case 0xBE: return 0x255B; /* ╛ */
+        case 0xCD: return 0x2550; /* ═ */
+        case 0xD4: return 0x2558; /* ╘ */
+        case 0xD5: return 0x2552; /* ╒ */
+        default:   return (gunichar)'?';
+    }
+}
+
+static char *screen_text_to_utf8(const char *src, int len) {
+    if (!src || len <= 0) return g_strdup("");
+    GString *out = g_string_sized_new((gsize)len * 2u + 1u);
+    if (!out) return g_strdup("");
+    for (int i = 0; i < len; i++) {
+        char utf8[8] = {0};
+        gunichar uc = screen_cp437_to_unicode((unsigned char)src[i]);
+        int n = g_unichar_to_utf8(uc, utf8);
+        if (n > 0) g_string_append_len(out, utf8, n);
+    }
+    return g_string_free(out, FALSE);
+}
+#endif /* !WBASIC_NO_UI */
+
+#ifndef WBASIC_NO_UI
+
+static int gfx_mode_palette_index(const App *app, int idx) {
+    int c = idx & 0x0F;
+    if (!app) return c;
+
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+        int ci = c & 0x03;
+        /* In SCREEN 1, color index 0 maps to COLOR background. */
+        if (ci == 0) {
+            int bg = (app->cur_bg >= 0 && app->cur_bg <= 15) ? app->cur_bg : 0;
+            return bg & 0x0F;
+        }
+        if ((app->gfx_cga_palette & 1) == 0) {
+            /* palette 0: green/red/brown */
+            static const int cga_screen1_map0[4] = { 0, 2, 4, 6 };
+            return cga_screen1_map0[ci];
+        }
+        /* palette 1: cyan/magenta/gray (CGA default intensity) */
+        static const int cga_screen1_map1[4] = { 0, 3, 5, 7 };
+        return cga_screen1_map1[ci];
+    }
+    if (app->video_mode == WB_VIDEO_GFX2 || app->video_mode == WB_VIDEO_GFX11) {
+        /* 1bpp modes: black/white. */
+        return (c & 0x01) ? 15 : 0;
+    }
+    return c;
+}
 
 static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_out[32]) {
     if (!app || !app->output_buf) { tagname_out[0] = 0; return; }
@@ -2480,7 +2566,9 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
 
 static void ui_update_output_mode(App *app) {
     if (!app || !app->output_stack) return;
-    if (video_mode_is_graphics(app->video_mode)) {
+    bool use_gfx_surface = video_mode_is_graphics(app->video_mode) ||
+                           (app->video_mode == WB_VIDEO_TEXT && app->screen_cols > 0 && app->screen_cols <= 40);
+    if (use_gfx_surface) {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "gfx");
     } else {
         gtk_stack_set_visible_child_name(GTK_STACK(app->output_stack), "text");
@@ -2504,11 +2592,14 @@ static void ui_color_idx_to_rgb(const App *app, int idx, double *r, double *g, d
         }
         idx = for_bg ? 0 : 7;
     }
-    idx &= 0x0F;
-    *r = (double)vga16_rgb[idx][0] / 255.0;
-    *g = (double)vga16_rgb[idx][1] / 255.0;
-    *b = (double)vga16_rgb[idx][2] / 255.0;
+    idx = gfx_mode_palette_index(app, idx);
+    *r = (double)vga16_rgb[idx & 0x0F][0] / 255.0;
+    *g = (double)vga16_rgb[idx & 0x0F][1] / 255.0;
+    *b = (double)vga16_rgb[idx & 0x0F][2] / 255.0;
 }
+
+static bool ui_draw_cp437_box_glyph(cairo_t *cr, unsigned char ch,
+                                    double x, double y, double cell_w, double cell_h);
 
 static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
                                      double ox, double oy,
@@ -2529,6 +2620,10 @@ static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
        so purely height-based sizing causes horizontal overlap (e.g., "COLOR" -> "CCLOR"). */
     double fs_h = cell_h * 0.82;
     double fs_w = cell_w * 1.45;
+    if (app->video_mode == WB_VIDEO_TEXT && C <= 40) {
+        /* 40-column text modes use effectively double-width glyph cells on CGA/EGA. */
+        fs_w = cell_w * 2.00;
+    }
     double font_sz = fs_h;
     if (fs_w < font_sz) font_sz = fs_w;
     if (font_sz < 6.0) font_sz = 6.0;
@@ -2570,18 +2665,67 @@ static void ui_draw_gfx_text_overlay(App *app, cairo_t *cr,
             double fr, fgc, fb;
             ui_color_idx_to_rgb(app, fg, &fr, &fgc, &fb, false);
             cairo_set_source_rgb(cr, fr, fgc, fb);
+            if (ui_draw_cp437_box_glyph(cr, (unsigned char)ch, x, y, cell_w, cell_h)) {
+                continue;
+            }
 
-            char txt[2] = { ch, 0 };
-            cairo_text_extents_t te;
-            cairo_text_extents(cr, txt, &te);
-            double tx = x + (cell_w - te.x_advance) * 0.5;
-            if (tx < x) tx = x;
+            char txt[8] = {0};
+            gunichar uc = screen_cp437_to_unicode((unsigned char)ch);
+            g_unichar_to_utf8(uc, txt);
+            /*
+               Cell-left anchoring keeps repeated box-drawing glyphs (e.g., CHR$(205))
+               visually contiguous in 40-column splash/title screens.
+            */
+            double tx = x + cell_w * 0.03;
             cairo_move_to(cr, tx, y + y_base_off);
             cairo_show_text(cr, txt);
         }
     }
 
     cairo_restore(cr);
+}
+
+static bool ui_draw_cp437_box_glyph(cairo_t *cr, unsigned char ch,
+                                    double x, double y, double cell_w, double cell_h) {
+    if (!cr) return false;
+    double cx = x + cell_w * 0.5;
+    double cy = y + cell_h * 0.5;
+    double lw = floor(fmin(cell_w, cell_h) * 0.18);
+    if (lw < 1.0) lw = 1.0;
+
+    cairo_save(cr);
+    cairo_set_line_width(cr, lw);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+
+    switch (ch) {
+        case 0xCD: /* ═ */
+            cairo_move_to(cr, x, cy); cairo_line_to(cr, x + cell_w, cy); break;
+        case 0xB3: /* │ */
+            cairo_move_to(cr, cx, y); cairo_line_to(cr, cx, y + cell_h); break;
+        case 0xD5: /* ╒ top-left */
+            cairo_move_to(cr, cx, cy); cairo_line_to(cr, x + cell_w, cy);
+            cairo_move_to(cr, cx, cy); cairo_line_to(cr, cx, y + cell_h);
+            break;
+        case 0xB8: /* ╕ top-right */
+            cairo_move_to(cr, x, cy); cairo_line_to(cr, cx, cy);
+            cairo_move_to(cr, cx, cy); cairo_line_to(cr, cx, y + cell_h);
+            break;
+        case 0xD4: /* ╘ bottom-left */
+            cairo_move_to(cr, cx, cy); cairo_line_to(cr, x + cell_w, cy);
+            cairo_move_to(cr, cx, y); cairo_line_to(cr, cx, cy);
+            break;
+        case 0xBE: /* ╛ bottom-right */
+            cairo_move_to(cr, x, cy); cairo_line_to(cr, cx, cy);
+            cairo_move_to(cr, cx, y); cairo_line_to(cr, cx, cy);
+            break;
+        default:
+            cairo_restore(cr);
+            return false;
+    }
+
+    cairo_stroke(cr);
+    cairo_restore(cr);
+    return true;
 }
 
 static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
@@ -2594,7 +2738,25 @@ static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_d
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
     cairo_paint(cr);
 
-    if (ww <= 0 || wh <= 0 || !app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) {
+    if (ww <= 0 || wh <= 0) {
+        return FALSE;
+    }
+
+    if (app->video_mode == WB_VIDEO_TEXT && app->screen_cols > 0 && app->screen_cols <= 40) {
+        double target_aspect = 4.0 / 3.0;
+        double draw_w = (double)ww;
+        double draw_h = draw_w / target_aspect;
+        if (draw_h > (double)wh) {
+            draw_h = (double)wh;
+            draw_w = draw_h * target_aspect;
+        }
+        double ox = ((double)ww - draw_w) * 0.5;
+        double oy = ((double)wh - draw_h) * 0.5;
+        ui_draw_gfx_text_overlay(app, cr, ox, oy, draw_w, draw_h);
+        return FALSE;
+    }
+
+    if (!app->gfx_pixels || app->gfx_width <= 0 || app->gfx_height <= 0) {
         return FALSE;
     }
 
@@ -2605,7 +2767,7 @@ static gboolean on_gfx_area_draw(GtkWidget *widget, cairo_t *cr, gpointer user_d
     if (!pix) return FALSE;
 
     for (size_t i = 0; i < n; i++) {
-        unsigned char c = app->gfx_pixels[i] & 0x0F;
+        unsigned char c = (unsigned char)gfx_mode_palette_index(app, app->gfx_pixels[i] & 0x0F);
         unsigned char r = vga16_rgb[c][0];
         unsigned char g = vga16_rgb[c][1];
         unsigned char b = vga16_rgb[c][2];
@@ -2657,7 +2819,8 @@ static void screen_render_now(App *app) {
     if (!app->output_buf || !app->output_view) return;
 
     ui_update_output_mode(app);
-    if (video_mode_is_graphics(app->video_mode)) {
+    bool text40_gfx_surface = (app->video_mode == WB_VIDEO_TEXT && app->screen_cols > 0 && app->screen_cols <= 40);
+    if (video_mode_is_graphics(app->video_mode) || text40_gfx_surface) {
         if (app->gfx_area) gtk_widget_queue_draw(app->gfx_area);
         return;
     }
@@ -2711,11 +2874,12 @@ static void screen_render_now(App *app) {
 
             char tagname[32];
             ensure_color_tag(app, fg, bg, tagname);
-
+            char *utf8 = screen_text_to_utf8(rowp + c, run);
             gtk_text_buffer_insert_with_tags_by_name(app->output_buf, &it,
-                                                     rowp + c, run,
+                                                     utf8, -1,
                                                      tagname[0] ? tagname : NULL,
                                                      NULL);
+            g_free(utf8);
             c += run;
         }
 
@@ -3779,6 +3943,39 @@ static bool name_is_string(const char *name_upper) {
     return n > 0 && name_upper[n-1] == '$';
 }
 
+static inline guint32 mem_key_build(int seg, int off) {
+    guint32 s = (guint32)(seg & 0xFFFF);
+    guint32 o = (guint32)(off & 0xFFFF);
+    return (s << 16) | o;
+}
+
+static unsigned char mem_default_byte(const App *app, int seg, int off) {
+    (void)app;
+    seg &= 0xFFFF;
+    off &= 0xFFFF;
+    /* Compatibility shim for DONKEY/GW-BASIC-era BIOS Data Area reads. */
+    if (seg == 0 && off == 0x0410) {
+        /* BIOS equipment byte default: color 80x25 display present, no extras. */
+        return 0x30;
+    }
+    return 0x00;
+}
+
+static unsigned char mem_peek_byte(const App *app, int seg, int off) {
+    if (!app || !app->mem_poke_overrides) return mem_default_byte(app, seg, off);
+    guint32 key = mem_key_build(seg, off);
+    gpointer v = g_hash_table_lookup(app->mem_poke_overrides, GUINT_TO_POINTER(key));
+    if (!v) return mem_default_byte(app, seg, off);
+    return (unsigned char)((GPOINTER_TO_UINT(v) - 1u) & 0xFFu);
+}
+
+static void mem_poke_byte(App *app, int seg, int off, int value) {
+    if (!app || !app->mem_poke_overrides) return;
+    guint32 key = mem_key_build(seg, off);
+    unsigned int b = (unsigned int)(value & 0xFF);
+    g_hash_table_insert(app->mem_poke_overrides, GUINT_TO_POINTER(key), GUINT_TO_POINTER(b + 1u));
+}
+
 
 
 static inline double coerce_int16(double v) {
@@ -4373,7 +4570,7 @@ if (!strcasecmp(name, "ERL")) {
                 !strcasecmp(name, "EXP") || !strcasecmp(name, "ABS") || !strcasecmp(name, "INT") ||
                 !strcasecmp(name, "SGN") || !strcasecmp(name, "FIX") || !strcasecmp(name, "CINT") ||
                 !strcasecmp(name, "RND") || !strcasecmp(name, "TIMER") || !strcasecmp(name, "PI") || !strcasecmp(name, "EOF") || !strcasecmp(name, "LOF") || !strcasecmp(name, "SEEK") || !strcasecmp(name, "CVI") || !strcasecmp(name, "CVS") || !strcasecmp(name, "CVD") ||
-                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND") || !strcasecmp(name, "POINT")) {
+                !strcasecmp(name, "LBOUND") || !strcasecmp(name, "UBOUND") || !strcasecmp(name, "POINT") || !strcasecmp(name, "PEEK")) {
 
                 consume(p, '(');
                 /* EOF(n) returns -1 at EOF, else 0. */
@@ -4554,12 +4751,23 @@ if (!strcasecmp(name, "ERL")) {
                     if (!parse_expr(app, p, &yv)) { free(name); return false; }
                     skip_ws(p);
                     if (!consume(p, ')')) { free(name); return false; }
-                    if (!wbasic_ui_active(app)) { err_set(app, "Graphics not available in CLI/headless mode"); free(name); return false; }
                     if (!video_mode_is_graphics(app->video_mode)) { err_set(app, "POINT requires graphics mode"); free(name); return false; }
                     int xi = (int)llround(xv);
                     int yi = (int)llround(yv);
                     int c = gfx_point(app, xi, yi);
                     *out = (c < 0) ? -1.0 : (double)c;
+                    free(name);
+                    return true;
+                }
+
+                if (!strcasecmp(name, "PEEK")) {
+                    double av = 0.0;
+                    if (!parse_expr(app, p, &av)) { free(name); return false; }
+                    skip_ws(p);
+                    if (!consume(p, ')')) { free(name); return false; }
+                    long off = llround(av);
+                    if (off < 0 || off > 0xFFFF) { err_set(app, "Illegal function call"); free(name); return false; }
+                    *out = (double)mem_peek_byte(app, app->mem_seg, (int)off);
                     free(name);
                     return true;
                 }
@@ -4963,6 +5171,8 @@ static bool parse_expr(App *app, Parser *p, double *out) {
 static bool wbasic_parse_expr(Parser *p, char opbuf[3]) {
     skip_ws(p);
     const char *s = p->s;
+    if (s[0] == '=' && s[1] == '<') { strcpy(opbuf, "<="); p->s += 2; return true; } /* legacy listing quirk */
+    if (s[0] == '=' && s[1] == '>') { strcpy(opbuf, ">="); p->s += 2; return true; } /* legacy listing quirk */
     if (s[0] == '=')  { strcpy(opbuf, "=");  p->s += 1; return true; }
     if (s[0] == '<' && s[1] == '>') { strcpy(opbuf, "<>"); p->s += 2; return true; }
     if (s[0] == '<' && s[1] == '=') { strcpy(opbuf, "<="); p->s += 2; return true; }
@@ -6030,6 +6240,7 @@ static void runtime_error(App *app, int line_no, const char *msg) {
     /* Record for ERR/ERL (GW-BASIC style). */
     app->last_err_line = line_no;
     app->last_err_code = gw_error_code_from_msg(msg);
+    snprintf(app->last_err_msg, sizeof(app->last_err_msg), "%s", msg ? msg : "Error");
 
     /* Phase 0 (RESUME groundwork): save exact error origin cursor.
    Prefer the live execution cursor, if available.
@@ -6076,6 +6287,8 @@ if (app->exec_cursor_valid) {
     if (app->run_state == RUN_RUNNING && app->on_error_goto_line > 0 && !app->in_error_handler) {
         int idx = program_find_index(&app->prog, app->on_error_goto_line);
         if (idx >= 0) {
+            fprintf(stderr, "[WBASIC trapped error] ERL=%d ERR=%d MSG=%s\n",
+                    app->last_err_line, app->last_err_code, app->last_err_msg);
             app->error_trap_pending = true;
             app->error_trap_line_idx = idx;
             app->error_trap_stmt_idx = 0;
@@ -6711,12 +6924,15 @@ static void gfx_draw_rotate_quadrant(int angle, int vx, int vy, int *rx, int *ry
     *rx = -vy; *ry = vx;
 }
 
+static int gfx_draw_scale_delta(int delta, int scale) {
+    /* GW-BASIC DRAW scale is N/4, so convert with rounded integer pixels. */
+    int num = delta * scale;
+    if (num >= 0) return (num + 2) / 4;
+    return -(((-num) + 2) / 4);
+}
+
 static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "DRAW requires graphics mode");
         return false;
@@ -6725,8 +6941,15 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
     skip_ws(p);
     char *script = NULL;
     if (!parse_string_value(app, p, &script)) {
-        runtime_error(app, current_line, "DRAW expects string");
-        return false;
+        skip_ws(p);
+        if (*p->s == '"') {
+            /* Legacy listing tolerance: allow unterminated DRAW "..." by taking rest of statement. */
+            script = xstrdup(p->s + 1);
+            p->s += strlen(p->s);
+        } else {
+            runtime_error(app, current_line, "DRAW expects string");
+            return false;
+        }
     }
     skip_ws(p);
     if (*p->s != '\0') {
@@ -6737,9 +6960,9 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
 
     int x = app->gfx_draw_x;
     int y = app->gfx_draw_y;
-    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 1;
+    int scale = (app->gfx_draw_scale > 0) ? app->gfx_draw_scale : 4;
     int angle = app->gfx_draw_angle & 3;
-    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    int color = gfx_default_fg_color_for_mode(app->video_mode, app->cur_fg);
 
     const char *q = script;
     while (*q) {
@@ -6824,13 +7047,16 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
                 int nx, ny;
                 if (rel) {
                     int rx = 0, ry = 0;
-                    gfx_draw_rotate_quadrant(angle, (int)xv * scale, (int)yv * scale, &rx, &ry);
+                    int sx = gfx_draw_scale_delta((int)xv, scale);
+                    int sy = gfx_draw_scale_delta((int)yv, scale);
+                    gfx_draw_rotate_quadrant(angle, sx, sy, &rx, &ry);
                     nx = x + rx;
                     ny = y + ry;
                 } else {
                     nx = (int)xv;
                     ny = (int)yv;
                 }
+                /* GW-BASIC DRAW uses BM for blank move; plain M draws unless blanked. */
                 gfx_draw_move(app, &x, &y, nx, ny, color, !blank);
                 if (no_update) { x = oldx; y = oldy; }
                 continue;
@@ -6843,7 +7069,9 @@ static bool exec_draw_gfx(App *app, Parser *p, int current_line) {
 
         int count = have_n ? n : 1;
         int rx = 0, ry = 0;
-        gfx_draw_rotate_quadrant(angle, dx * scale * count, dy * scale * count, &rx, &ry);
+        int sx = gfx_draw_scale_delta(dx * count, scale);
+        int sy = gfx_draw_scale_delta(dy * count, scale);
+        gfx_draw_rotate_quadrant(angle, sx, sy, &rx, &ry);
         gfx_draw_move(app, &x, &y, x + rx, y + ry, color, !blank);
         if (no_update) { x = oldx; y = oldy; }
     }
@@ -6913,10 +7141,6 @@ static bool parse_gfx_array_ref(App *app, Parser *p, int current_line, GfxArrayR
 
 static bool exec_get_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "GET requires graphics mode");
         return false;
@@ -6962,21 +7186,38 @@ static bool exec_get_gfx(App *app, Parser *p, int current_line) {
 
     int w = xmax - xmin + 1;
     int h = ymax - ymin + 1;
-    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    int bpp = 4;
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) bpp = 2;
+    else if (app->video_mode == WB_VIDEO_GFX2 || app->video_mode == WB_VIDEO_GFX11) bpp = 1;
+    else if (app->video_mode == WB_VIDEO_GFX13) bpp = 8;
+    int row_bits = w * bpp;
+    int bytes_per_row = (row_bits + 7) / 8;
+    int words_per_row = (bytes_per_row + 1) / 2;
+    int pixels_per_word = 16 / bpp;
+    size_t packed_words = (size_t)words_per_row * (size_t)h;
+    size_t needed = (size_t)2 + packed_words;
     if (ar.start_off + needed > ar.v->arr_total) {
         runtime_error(app, current_line, "GET/PUT array too small");
         return false;
     }
 
-    ar.v->arr[ar.start_off] = (double)w;
+    ar.v->arr[ar.start_off] = (double)bytes_per_row;
     ar.v->arr[ar.start_off + 1] = (double)h;
 
     size_t out = ar.start_off + 2;
     for (int yy = ymin; yy <= ymax; yy++) {
-        for (int xx = xmin; xx <= xmax; xx++) {
-            int c = gfx_point(app, xx, yy);
-            if (c < 0) c = 0;
-            ar.v->arr[out++] = (double)(c & 0x0F);
+        for (int wr = 0; wr < words_per_row; wr++) {
+            unsigned int word = 0;
+            for (int pi = 0; pi < pixels_per_word; pi++) {
+                int xx = xmin + wr * pixels_per_word + pi;
+                int c = 0;
+                c = gfx_point(app, xx, yy);
+                if (c < 0) c = 0;
+                unsigned int mask = (1u << bpp) - 1u;
+                int bit_shift = (pixels_per_word - 1 - pi) * bpp; /* GW bit order: left pixels in high bits */
+                word |= ((unsigned int)(c & (int)mask) << bit_shift);
+            }
+            ar.v->arr[out++] = (double)(word & 0xFFFFu);
         }
     }
     return true;
@@ -6984,10 +7225,6 @@ static bool exec_get_gfx(App *app, Parser *p, int current_line) {
 
 static bool exec_put_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "PUT requires graphics mode");
         return false;
@@ -7006,13 +7243,16 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
     GfxArrayRef ar = {0};
     if (!parse_gfx_array_ref(app, p, current_line, &ar)) return false;
 
-    int op_mode = 0; /* PSET/copy */
+    int op_mode = 3; /* GW-BASIC default for PUT is XOR */
     skip_ws(p);
     if (consume(p, ',')) {
         skip_ws(p);
         if (starts_ci(p->s, "PSET") && is_word_boundary(p->s[4])) {
             op_mode = 0;
             p->s += 4;
+        } else if (starts_ci(p->s, "PRESET") && is_word_boundary(p->s[6])) {
+            op_mode = 4;
+            p->s += 6;
         } else if (starts_ci(p->s, "OR") && is_word_boundary(p->s[2])) {
             op_mode = 1;
             p->s += 2;
@@ -7032,22 +7272,76 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
     if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
 
     if (ar.start_off + 2 > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
-    int w = (int)llround(ar.v->arr[ar.start_off]);
+    int hdr0 = (int)llround(ar.v->arr[ar.start_off]);
     int h = (int)llround(ar.v->arr[ar.start_off + 1]);
-    if (w <= 0 || h <= 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
-
-    size_t needed = (size_t)2 + (size_t)w * (size_t)h;
+    if (hdr0 <= 0 || h <= 0) { runtime_error(app, current_line, "Illegal function call"); return false; }
+    int words_per_row = 0;
+    int bpp = 4;
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) bpp = 2;
+    else if (app->video_mode == WB_VIDEO_GFX2 || app->video_mode == WB_VIDEO_GFX11) bpp = 1;
+    else if (app->video_mode == WB_VIDEO_GFX13) bpp = 8;
+    int pixels_per_word = 16 / bpp;
+    int logical_w = 0;
+    int bytes_per_row = 0;
+    bool legacy_pixel_width_header =
+        (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10 ||
+         app->video_mode == WB_VIDEO_GFX2 || app->video_mode == WB_VIDEO_GFX11) &&
+        (hdr0 > 0 && hdr0 <= 2);
+    if (legacy_pixel_width_header) {
+        /* Legacy hand-authored buffers (e.g., DONKEY B%) may encode very small width in pixels. */
+        logical_w = hdr0;
+        words_per_row = (logical_w + pixels_per_word - 1) / pixels_per_word;
+        bytes_per_row = words_per_row * 2;
+    } else {
+        bytes_per_row = hdr0;
+        words_per_row = (bytes_per_row + 1) / 2;
+        logical_w = (bytes_per_row * 8) / bpp;
+    }
+    unsigned int mask = (1u << bpp) - 1u;
+    size_t packed_words = (size_t)words_per_row * (size_t)h;
+    size_t needed = (size_t)2 + packed_words;
     if (ar.start_off + needed > ar.v->arr_total) { runtime_error(app, current_line, "GET/PUT array too small"); return false; }
+
+    /*
+       GW GET buffers are word-aligned, so rows can include padded tail pixels.
+       Trim fully-background trailing columns to avoid right-edge overwrite when
+       blitting captured sprites near lane borders.
+    */
+    int bg_key = 0;
+    if (packed_words > 0) {
+        unsigned int word0 = ((unsigned int)llround(ar.v->arr[ar.start_off + 2])) & 0xFFFFu;
+        int shift0 = (pixels_per_word - 1) * bpp;
+        bg_key = (int)((word0 >> shift0) & mask);
+    }
+    int effective_w = logical_w;
+    for (int col = logical_w - 1; col >= 0; col--) {
+        bool all_bg = true;
+        int wr = col / pixels_per_word;
+        int pi = col % pixels_per_word;
+        int bit_shift = (pixels_per_word - 1 - pi) * bpp;
+        for (int yy = 0; yy < h; yy++) {
+            size_t row_base = ar.start_off + 2 + (size_t)yy * (size_t)words_per_row;
+            unsigned int word = ((unsigned int)llround(ar.v->arr[row_base + (size_t)wr])) & 0xFFFFu;
+            int src = (int)((word >> bit_shift) & mask);
+            if (src != bg_key) { all_bg = false; break; }
+        }
+        if (!all_bg) { effective_w = col + 1; break; }
+        if (col == 0) effective_w = 0;
+    }
 
     int x0 = (int)llround(xv);
     int y0 = (int)llround(yv);
     size_t in = ar.start_off + 2;
-
     for (int yy = 0; yy < h; yy++) {
-        for (int xx = 0; xx < w; xx++) {
+        for (int wr = 0; wr < words_per_row; wr++) {
+            unsigned int word = ((unsigned int)llround(ar.v->arr[in++])) & 0xFFFFu;
+            for (int pi = 0; pi < pixels_per_word; pi++) {
+                int xx = wr * pixels_per_word + pi;
+                if (xx >= effective_w) continue;
             int dstx = x0 + xx;
             int dsty = y0 + yy;
-            int src = ((int)llround(ar.v->arr[in++])) & 0x0F;
+            int bit_shift = (pixels_per_word - 1 - pi) * bpp; /* GW bit order: left pixels in high bits */
+            int src = (int)((word >> bit_shift) & mask);
 
             if (dstx < 0 || dsty < 0 || dstx >= app->gfx_width || dsty >= app->gfx_height) continue;
 
@@ -7055,11 +7349,13 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
             if (oldc < 0) oldc = 0;
 
             int outc = src;
-            if (op_mode == 1) outc = (oldc | src) & 0x0F;
-            else if (op_mode == 2) outc = (oldc & src) & 0x0F;
-            else if (op_mode == 3) outc = (oldc ^ src) & 0x0F;
+            if (op_mode == 1) outc = (oldc | src) & (int)mask;
+            else if (op_mode == 2) outc = (oldc & src) & (int)mask;
+            else if (op_mode == 3) outc = (oldc ^ src) & (int)mask;
+            else if (op_mode == 4) outc = ((~src) & (int)mask); /* GW-BASIC PRESET writes inverted source bits */
 
             (void)gfx_pset(app, dstx, dsty, outc);
+            }
         }
     }
 
@@ -7072,10 +7368,6 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
 
 static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "CIRCLE requires graphics mode");
         return false;
@@ -7092,7 +7384,7 @@ static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
     if (!consume(p, ',')) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
     if (!parse_expr(app, p, &rv)) { runtime_error(app, current_line, "CIRCLE expects radius"); return false; }
 
-    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    int color = gfx_default_fg_color_for_mode(app->video_mode, app->cur_fg);
     skip_ws(p);
     if (consume(p, ',')) {
         double cv = 0.0;
@@ -7117,41 +7409,45 @@ static bool exec_circle_gfx(App *app, Parser *p, int current_line) {
 
 static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "PAINT requires graphics mode");
         return false;
     }
 
     skip_ws(p);
-    if (!consume(p, '(')) { runtime_error(app, current_line, "PAINT expects (x,y),color"); return false; }
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PAINT expects (x,y)"); return false; }
 
     double xv = 0.0, yv = 0.0, cv = 0.0;
+    bool have_color = false;
     bool have_border = false;
     int border = 0;
     if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PAINT expects x"); return false; }
     if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects ','"); return false; }
     if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PAINT expects y"); return false; }
     if (!consume(p, ')')) { runtime_error(app, current_line, "PAINT missing ')'" ); return false; }
-    if (!consume(p, ',')) { runtime_error(app, current_line, "PAINT expects color"); return false; }
-    if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+    skip_ws(p);
+    if (consume(p, ',')) {
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PAINT expects color"); return false; }
+        have_color = true;
+    }
 
     /* Optional border color argument for boundary fill semantics. */
     skip_ws(p);
-    if (consume(p, ',')) {
+    if (have_color && consume(p, ',')) {
         double bv = 0.0;
         if (!parse_expr(app, p, &bv)) { runtime_error(app, current_line, "PAINT expects border"); return false; }
         border = (int)llround(bv);
+        have_border = true;
+    } else if (have_color) {
+        /* GW-BASIC default border color is current foreground when omitted. */
+        border = gfx_default_fg_color_for_mode(app->video_mode, app->cur_fg);
         have_border = true;
     }
 
     skip_ws(p);
     if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
 
-    int color = (int)llround(cv);
+    int color = have_color ? (int)llround(cv) : app->cur_fg;
     if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
 
     int x = (int)llround(xv);
@@ -7167,10 +7463,90 @@ static bool exec_paint_gfx(App *app, Parser *p, int current_line) {
     return true;
 }
 
+static bool exec_def_seg(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    skip_ws(p);
+    if (*p->s == '\0') {
+        app->mem_seg = 0;
+        return true;
+    }
+    if (!consume(p, '=')) {
+        runtime_error(app, current_line, "DEF SEG expects '='");
+        return false;
+    }
+    double sv = 0.0;
+    if (!parse_expr(app, p, &sv)) {
+        runtime_error(app, current_line, "DEF SEG expects segment");
+        return false;
+    }
+    skip_ws(p);
+    if (*p->s != '\0') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    long seg = llround(sv);
+    if (seg < 0 || seg > 0xFFFF) {
+        runtime_error(app, current_line, "Illegal function call");
+        return false;
+    }
+    app->mem_seg = (int)seg;
+    return true;
+}
+
+static bool exec_poke(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    double av = 0.0, vv = 0.0;
+    if (!parse_expr(app, p, &av)) {
+        runtime_error(app, current_line, "POKE expects address");
+        return false;
+    }
+    if (!consume(p, ',')) {
+        runtime_error(app, current_line, "POKE expects ','");
+        return false;
+    }
+    if (!parse_expr(app, p, &vv)) {
+        runtime_error(app, current_line, "POKE expects value");
+        return false;
+    }
+    skip_ws(p);
+    if (*p->s != '\0') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    long off = llround(av);
+    long val = llround(vv);
+    if (off < 0 || off > 0xFFFF) {
+        runtime_error(app, current_line, "Illegal function call");
+        return false;
+    }
+    mem_poke_byte(app, app->mem_seg, (int)off, (int)val);
+    return true;
+}
+
+static bool exec_sound(App *app, Parser *p, int current_line) {
+    (void)app; (void)current_line;
+    /* Compatibility stub: accept and ignore everything to end-of-statement. */
+    if (!p) return false;
+    p->s += strlen(p->s);
+    return true;
+}
+
+static bool exec_play(App *app, Parser *p, int current_line) {
+    (void)app; (void)current_line;
+    /* Compatibility stub: accept and ignore everything to end-of-statement. */
+    if (!p) return false;
+    p->s += strlen(p->s);
+    return true;
+}
+
 /* ---- File I/O helpers ---- */
 static void files_close_all(App *app);
 static BasicFile *file_get(App *app, int n);
 static bool exec_defint(App *app, Parser *p, int current_line);
+static bool exec_def_seg(App *app, Parser *p, int current_line);
+static bool exec_poke(App *app, Parser *p, int current_line);
+static bool exec_sound(App *app, Parser *p, int current_line);
+static bool exec_play(App *app, Parser *p, int current_line);
 static bool exec_open(App *app, Parser *p, int current_line);
 static bool exec_field(App *app, Parser *p, int current_line);
 static bool exec_lset_rset(App *app, Parser *p, int current_line, bool right_justify);
@@ -8029,6 +8405,25 @@ static bool exec_color(App *app, Parser *p, int current_line) {
         }
     }
 
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+        /*
+           GW-BASIC SCREEN 1: COLOR background[,palette]
+           - first argument sets background color (0..15)
+           - second argument selects CGA palette (0 or 1)
+        */
+        if (have_fg) {
+            if (new_fg < 0 || new_fg > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+            app->cur_bg = new_fg;
+        }
+        if (have_bg) {
+            if (!(new_bg == 0 || new_bg == 1)) { runtime_error(app, current_line, "Bad color"); return false; }
+            app->gfx_cga_palette = new_bg;
+        }
+        /* Keep graphics drawing default within SCREEN 1 color range. */
+        app->cur_fg = 3;
+        return true;
+    }
+
     if (have_fg) {
         /*
            GW-BASIC accepts foreground values 0..31 for COLOR attributes
@@ -8099,17 +8494,15 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
         return false;
     }
 
-    if ((spec->policy_flags & SCREEN_POLICY_REQUIRES_UI) && !wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
-
     if ((spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) && !gfx_alloc(app, spec->w, spec->h)) {
         runtime_error(app, current_line, "Out of memory");
         return false;
     }
 
     app->video_mode = (WbVideoMode)spec->mode;
+    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+        app->gfx_cga_palette = 1;
+    }
     if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
         gfx_clear(app, (unsigned char)((app->cur_bg >= 0) ? app->cur_bg : 0));
         gfx_draw_reset_defaults(app);
@@ -8121,10 +8514,6 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
 
 static bool exec_pset(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
-        return false;
-    }
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "PSET requires graphics mode");
         return false;
@@ -8139,7 +8528,7 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
     if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PSET expects y"); return false; }
     if (!consume(p, ')')) { runtime_error(app, current_line, "PSET missing ')'"); return false; }
 
-    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    int color = gfx_default_fg_color_for_mode(app->video_mode, app->cur_fg);
     skip_ws(p);
     if (consume(p, ',')) {
         double cv = 0.0;
@@ -8161,12 +8550,45 @@ static bool exec_pset(App *app, Parser *p, int current_line) {
     return ok;
 }
 
-static bool exec_line_gfx(App *app, Parser *p, int current_line) {
+static bool exec_preset(App *app, Parser *p, int current_line) {
     if (!app || !p) return false;
-    if (!wbasic_ui_active(app)) {
-        runtime_error(app, current_line, "Graphics not available in CLI/headless mode");
+    if (!video_mode_is_graphics(app->video_mode)) {
+        runtime_error(app, current_line, "PRESET requires graphics mode");
         return false;
     }
+
+    skip_ws(p);
+    if (!consume(p, '(')) { runtime_error(app, current_line, "PRESET expects (x,y)"); return false; }
+
+    double xv = 0.0, yv = 0.0;
+    if (!parse_expr(app, p, &xv)) { runtime_error(app, current_line, "PRESET expects x"); return false; }
+    if (!consume(p, ',')) { runtime_error(app, current_line, "PRESET expects ','"); return false; }
+    if (!parse_expr(app, p, &yv)) { runtime_error(app, current_line, "PRESET expects y"); return false; }
+    if (!consume(p, ')')) { runtime_error(app, current_line, "PRESET missing ')'"); return false; }
+
+    int color = gfx_default_bg_color_for_mode(app->video_mode, app->cur_bg);
+    skip_ws(p);
+    if (consume(p, ',')) {
+        double cv = 0.0;
+        if (!parse_expr(app, p, &cv)) { runtime_error(app, current_line, "PRESET expects color"); return false; }
+        color = (int)llround(cv);
+    }
+    skip_ws(p);
+    if (*p->s != '\0') { runtime_error(app, current_line, "Syntax error"); return false; }
+    if (color < 0 || color > 15) { runtime_error(app, current_line, "Bad color"); return false; }
+
+    int x = (int)llround(xv);
+    int y = (int)llround(yv);
+    bool ok = gfx_pset(app, x, y, color);
+    if (!ok) { runtime_error(app, current_line, "Illegal function call"); return false; }
+    app->gfx_draw_x = x;
+    app->gfx_draw_y = y;
+    screen_render(app);
+    return true;
+}
+
+static bool exec_line_gfx(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
     if (!video_mode_is_graphics(app->video_mode)) {
         runtime_error(app, current_line, "LINE requires graphics mode");
         return false;
@@ -8189,7 +8611,7 @@ static bool exec_line_gfx(App *app, Parser *p, int current_line) {
     if (!parse_expr(app, p, &y2v)) { runtime_error(app, current_line, "LINE expects y2"); return false; }
     if (!consume(p, ')')) { runtime_error(app, current_line, "LINE missing ')'" ); return false; }
 
-    int color = (app->cur_fg >= 0 && app->cur_fg <= 15) ? app->cur_fg : 15;
+    int color = gfx_default_fg_color_for_mode(app->video_mode, app->cur_fg);
     int draw_mode = 0; /* 0=line, 1=box, 2=boxfill */
 
     skip_ws(p);
@@ -10817,6 +11239,34 @@ if (stmt_is_block_else(s)) {
 // DATA is non-executable (its contents are scanned at RUN time into the DATA pool)
 if (starts_ci(s, "DATA") && is_word_boundary(s[4])) { free(tmp); return true; }
 
+// DEF SEG[=expr] (must be handled before generic DEF FN parsing)
+if (starts_ci(s, "DEF") && isspace((unsigned char)s[3])) {
+    Parser p = { s + 3 };
+    skip_ws(&p);
+    if (starts_ci(p.s, "SEG") && is_word_boundary(p.s[3])) {
+        p.s += 3;
+        bool ok = exec_def_seg(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+}
+
+// Compatibility stubs: accept PLAY/SOUND early so nothing else intercepts these lines.
+if (starts_ci(s, "SOUND") && is_word_boundary(s[5])) {
+    Parser p = { s + 5 };
+    bool ok = exec_sound(app, &p, current_line);
+    if (!ok) runtime_error(app, current_line, "SOUND syntax");
+    free(tmp);
+    return ok;
+}
+if (starts_ci(s, "PLAY") && is_word_boundary(s[4])) {
+    Parser p = { s + 4 };
+    bool ok = exec_play(app, &p, current_line);
+    if (!ok) runtime_error(app, current_line, "PLAY syntax");
+    free(tmp);
+    return ok;
+}
+
 
 // DEF FNname[(args...)] = <numeric-expression>
 if (starts_ci(s, "DEF") && is_word_boundary(s[3])) {
@@ -11178,6 +11628,12 @@ if (starts_ci(s, "KEY") && is_word_boundary(s[3])) {
         free(tmp);
         return ok;
     }
+    if (starts_ci(s, "PRESET") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_preset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
     if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
         char *t = s + 4;
@@ -11276,6 +11732,12 @@ if (starts_ci(s, "CLEAR") && is_word_boundary(s[5])) {
     if (starts_ci(s, "DEFSTR") && is_word_boundary(s[6])) {
         Parser p = { s + 6 };
         bool ok = exec_defstr(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+    if (starts_ci(s, "POKE") && is_word_boundary(s[4])) {
+        Parser p = { s + 4 };
+        bool ok = exec_poke(app, &p, current_line);
         free(tmp);
         return ok;
     }
@@ -11841,6 +12303,11 @@ app->err_origin_valid = false;
                 int cur_si = (*stmt_idx > 0) ? (*stmt_idx - 1) : 0;
                 if (app->gosub_sp >= 128) { runtime_error(app, current_line, "GOSUB stack overflow"); free(tmp); return false; }
                 app->gosub_stack[app->gosub_sp++] = (GosubFrame){ .kind = GOSUB_RET_NORMAL, .ret_line_idx = *line_idx, .ret_stmt_idx = cur_si + 1, .ret_chain_next_si = 0, .ret_chain_text = NULL };
+            } else {
+                for (int i = 0; i < app->for_sp; i++) free(app->for_stack[i].var_name);
+                app->for_sp = 0;
+                app->while_sp = 0;
+                app->do_sp = 0;
             }
             *line_idx = idx;
             *stmt_idx = 0;
@@ -11878,6 +12345,10 @@ app->err_origin_valid = false;
             idx = program_find_index(&app->prog, target);
         }
         if (idx < 0) { runtime_error(app, current_line, "GOTO target not found"); free(tmp); return false; }
+        for (int i = 0; i < app->for_sp; i++) free(app->for_stack[i].var_name);
+        app->for_sp = 0;
+        app->while_sp = 0;
+        app->do_sp = 0;
         *line_idx = idx;
         *stmt_idx = 0;
         free(tmp);
@@ -12184,6 +12655,12 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
         free(tmp);
         return ok;
     }
+    if (starts_ci(s, "PRESET") && is_word_boundary(s[6])) {
+        Parser p = { s + 6 };
+        bool ok = exec_preset(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
     if (starts_ci(s, "LINE") && is_word_boundary(s[4])) {
         char *t = s + 4;
         while (*t && isspace((unsigned char)*t)) t++;
@@ -12229,6 +12706,44 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
 
 /* ===================== Listing / File IO ===================== */
 
+static char *wbasic_normalize_source_text(const char *src, gsize in_len, gsize *out_len) {
+    if (!src) {
+        if (out_len) *out_len = 0;
+        return g_strdup("");
+    }
+    gsize eff = in_len;
+    for (gsize i = 0; i < in_len; i++) {
+        if (((unsigned char)src[i]) == 0x1A) { eff = i; break; } /* DOS EOF marker */
+    }
+
+    GString *gs = g_string_sized_new(eff + 8);
+    for (gsize i = 0; i < eff; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\r') {
+            if (i + 1 < eff && src[i + 1] == '\n') continue; /* CRLF -> LF */
+            g_string_append_c(gs, '\n');
+            continue;
+        }
+        g_string_append_c(gs, (char)c);
+    }
+    if (out_len) *out_len = gs->len;
+    return g_string_free(gs, FALSE);
+}
+
+static char *wbasic_encode_dos_text(const char *src, gsize *out_len) {
+    if (!src) src = "";
+    gsize n = strlen(src);
+    GString *gs = g_string_sized_new(n + 16);
+    for (gsize i = 0; i < n; i++) {
+        char c = src[i];
+        if (c == '\n') g_string_append(gs, "\r\n");
+        else g_string_append_c(gs, c);
+    }
+    g_string_append_c(gs, (char)0x1A); /* DOS EOF marker */
+    if (out_len) *out_len = gs->len;
+    return g_string_free(gs, FALSE);
+}
+
 
 #ifndef WBASIC_NO_UI
 static bool file_load_into_editor(App *app, const char *path) {
@@ -12240,9 +12755,12 @@ static bool file_load_into_editor(App *app, const char *path) {
         g_error_free(err);
         return false;
     }
+    gsize norm_len = 0;
+    char *norm = wbasic_normalize_source_text(contents, len, &norm_len);
     app->suppress_dirty = true;
-    editor_set_text(app->editor_buf, contents);
+    editor_set_text(app->editor_buf, norm);
     app->suppress_dirty = false;
+    g_free(norm);
     g_free(contents);
     set_current_path(app, path);
     recent_add(app, path);
@@ -12256,13 +12774,17 @@ static bool file_load_into_editor(App *app, const char *path) { (void)app; (void
 #ifndef WBASIC_NO_UI
 static bool file_save_from_editor(App *app, const char *path) {
     char *text = editor_get_text(app->editor_buf);
+    gsize dos_len = 0;
+    char *dos = wbasic_encode_dos_text(text, &dos_len);
     GError *err = NULL;
-    if (!g_file_set_contents(path, text, -1, &err)) {
+    if (!g_file_set_contents(path, dos, (gssize)dos_len, &err)) {
         out_printf(app, "SAVE failed: %s\n", err->message);
         g_error_free(err);
+        g_free(dos);
         g_free(text);
         return false;
     }
+    g_free(dos);
     g_free(text);
     return true;
 }
@@ -12616,6 +13138,9 @@ static void runtime_reset(App *app) {
         app->pause_flag = false;
     app->option_base = 0;
     app->option_base_locked = false;
+    app->mem_seg = 0;
+    app->gfx_cga_palette = 1;
+    if (app->mem_poke_overrides) g_hash_table_remove_all(app->mem_poke_overrides);
     for (int i = 0; i < 26; i++) app->def_type[i] = (unsigned char)DT_SNG;
     app->exec_pace_accum_us = 0.0;
 
@@ -12627,6 +13152,7 @@ static void runtime_reset(App *app) {
     for (int i = 0; i < app->for_sp; i++) free(app->for_stack[i].var_name);
     app->for_sp = 0;
     app->while_sp = 0;
+    app->do_sp = 0;
     app->gosub_sp = 0;
 
     if (app->resume_chain_text) { free(app->resume_chain_text); app->resume_chain_text = NULL; }
@@ -12643,6 +13169,7 @@ static void runtime_reset(App *app) {
     app->in_error_handler = false;
     app->last_err_line = -1;
     app->last_err_code = 0;
+    app->last_err_msg[0] = '\0';
     app->exec_cursor_valid = false;
     app->err_origin_valid = false;
     app->err_origin_line_idx = -1;
@@ -12818,6 +13345,19 @@ if (app->key_trap_enabled && app->runtime_key_macro && app->runtime_key_macro[0]
 bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &next_line_idx, &next_stmt_idx);
 
         stmtlist_free(&sl);
+
+        /* Compatibility safety-net:
+           Some legacy programs probe PLAY/SOUND capabilities under ON ERROR.
+           If a parser edge still returns false here for those statements,
+           do not terminate execution. */
+        if (!cont) {
+            const char *st = stmt;
+            while (*st && isspace((unsigned char)*st)) st++;
+            if ((starts_ci(st, "PLAY") && is_word_boundary(st[4])) ||
+                (starts_ci(st, "SOUND") && is_word_boundary(st[5]))) {
+                cont = true;
+            }
+        }
 
         finish_inkey_wait_after_statement(app);
 
@@ -15384,6 +15924,7 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
 
     program_init(&app.prog);
     app.vars = g_hash_table_new_full(g_str_hash, g_str_equal, free_key, free_val);
+    app.mem_poke_overrides = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     /* Run the embedded program once and exit. */
     do_exec_from(&app, 0, 0, true, true);
@@ -15393,6 +15934,7 @@ static int wbasic_run_headless_from_text(int argc, char **argv, const char *sour
     runtime_reset(&app);
     program_free(&app.prog);
     g_hash_table_destroy(app.vars);
+    g_hash_table_destroy(app.mem_poke_overrides);
     free(app.screen);
     free(app.screen_fg);
     free(app.screen_bg);
@@ -15462,6 +16004,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     if (argc > 0 && argv && argv[0] && *argv[0]) set_current_path(&app, argv[0]);
     program_init(&app.prog);
     app.vars = g_hash_table_new_full(g_str_hash, g_str_equal, free_key, free_val);
+    app.mem_poke_overrides = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     build_ui(&app);
 
@@ -15478,6 +16021,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
     runtime_reset(&app);
     program_free(&app.prog);
     g_hash_table_destroy(app.vars);
+    g_hash_table_destroy(app.mem_poke_overrides);
     if (app.css_provider) g_object_unref(app.css_provider);
     if (app.scrollback_lines) {
         scrollback_clear(&app);
@@ -15606,15 +16150,19 @@ int wbasic_main(int argc, char **argv) {
             fprintf(stderr, "Failed to read %s\n", in_bas);
             return 1;
         }
+        gsize norm_len = 0;
+        char *norm = wbasic_normalize_source_text(contents, len, &norm_len);
         char *buildlog = NULL;
-        int rc = export_standalone_from_text(contents, out_exe, 100, false, &buildlog);
+        int rc = export_standalone_from_text(norm, out_exe, 100, false, &buildlog);
         if (rc != 0) {
             fprintf(stderr, "Export failed.\n");
             if (buildlog) { fprintf(stderr, "%s\n", buildlog); g_free(buildlog); }
+            g_free(norm);
             g_free(contents);
             return 1;
         }
         if (buildlog) g_free(buildlog);
+        g_free(norm);
         g_free(contents);
         printf("Exported standalone executable: %s\n", out_exe);
         return 0;
@@ -15677,6 +16225,8 @@ int wbasic_main(int argc, char **argv) {
             fprintf(stderr, "Failed to read: %s\n", in_bas);
             return 1;
         }
+        gsize norm_len = 0;
+        char *norm = wbasic_normalize_source_text(contents, len, &norm_len);
 
         /* Strip the input filename and --cli/--headless/--gtk from argv before calling runner. */
         char *argv2[256];
@@ -15692,7 +16242,8 @@ int wbasic_main(int argc, char **argv) {
         }
         argv2[argc2] = NULL;
 
-        int rc = wbasic_run_headless_from_text(argc2, argv2, contents);
+        int rc = wbasic_run_headless_from_text(argc2, argv2, norm);
+        g_free(norm);
         g_free(contents);
         return rc;
     }
@@ -15770,6 +16321,7 @@ app.screen = NULL;
     program_init(&app.prog);
 
     app.vars = g_hash_table_new_full(g_str_hash, g_str_equal, free_key, free_val);
+    app.mem_poke_overrides = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     build_ui(&app);
     gtk_widget_show_all(app.win);
@@ -15791,6 +16343,7 @@ app.screen = NULL;
     runtime_reset(&app);
     program_free(&app.prog);
     g_hash_table_destroy(app.vars);
+    g_hash_table_destroy(app.mem_poke_overrides);
     if (app.css_provider) g_object_unref(app.css_provider);
     if (app.scrollback_lines) {
         scrollback_clear(&app);
@@ -15842,6 +16395,8 @@ int wbasic_main(int argc, char **argv) {
         fprintf(stderr, "Failed to read: %s\n", in_bas);
         return 1;
     }
+    gsize norm_len = 0;
+    char *norm = wbasic_normalize_source_text(contents, len, &norm_len);
 
     // wbasic_run_embedded parses runtime flags like -s/--speed. It does NOT expect the input filename
     // to appear in argv, so strip it out before calling.
@@ -15856,7 +16411,8 @@ int wbasic_main(int argc, char **argv) {
     }
     argv2[argc2] = NULL;
 
-    int rc = wbasic_run_embedded(argc2, argv2, contents);
+    int rc = wbasic_run_embedded(argc2, argv2, norm);
+    g_free(norm);
     g_free(contents);
     return rc;
 }
