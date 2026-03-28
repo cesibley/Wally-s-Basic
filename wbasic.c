@@ -4073,11 +4073,6 @@ static bool parse_string_literal(Parser *p, char **out) {
             continue;
         }
         if (*p->s == '"') break;
-        if (*p->s == '\\' && p->s[1]) {
-            char n = p->s[1];
-            if (n == 'n') { g_string_append_c(gs, '\n'); p->s += 2; continue; }
-            if (n == '"') { g_string_append_c(gs, '"'); p->s += 2; continue; }
-        }
         g_string_append_c(gs, *p->s++);
     }
     if (*p->s != '"') { g_string_free(gs, TRUE); return false; }
