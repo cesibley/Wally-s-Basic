@@ -1,5 +1,5 @@
 10 REM -- WBASIC Picture Program: A Simple House --
-20 SCREEN 1
+20 SCREEN 7
 30 COLOR 15, 1
 40 CLS
 50 REM -- Sky is background color set by COLOR --
@@ -22,3 +22,4 @@
 220 PAINT (280, 40), 14, 14
 230 REM -- Wait for key --
 240 Z$ = INKEY$ : IF Z$ = "" THEN 240
+
