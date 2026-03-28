@@ -14,6 +14,7 @@
 130  BH = H \ 4
 140
 150  FOR C = 0 TO 15
+152    IF M = 1 AND C >= 4 THEN 260
 155    DC = C
 156    IF M = 1 THEN DC = C AND 3
 160    X = (C MOD 4) * BW
