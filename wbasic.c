@@ -898,8 +898,7 @@ static bool video_mode_is_graphics(WbVideoMode mode) {
 }
 
 static int gfx_mode_pixel_mask_for_mode(WbVideoMode mode) {
-    if (mode == WB_VIDEO_GFX1 || mode == WB_VIDEO_GFX10) return 0x03;
-    if (mode == WB_VIDEO_GFX2 || mode == WB_VIDEO_GFX11) return 0x01;
+    if (mode == WB_VIDEO_GFX1) return 0x03;
     if (mode == WB_VIDEO_GFX13) return 0xFF;
     return 0x0F;
 }
@@ -2466,7 +2465,7 @@ static int gfx_mode_palette_index(const App *app, int idx) {
     int c = idx & 0x0F;
     if (!app) return c;
 
-    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+    if (app->video_mode == WB_VIDEO_GFX1) {
         int ci = c & 0x03;
         /* In SCREEN 1, color index 0 maps to COLOR background. */
         if (ci == 0) {
@@ -2481,10 +2480,6 @@ static int gfx_mode_palette_index(const App *app, int idx) {
         /* palette 1: cyan/magenta/gray (CGA default intensity) */
         static const int cga_screen1_map1[4] = { 0, 3, 5, 7 };
         return cga_screen1_map1[ci];
-    }
-    if (app->video_mode == WB_VIDEO_GFX2 || app->video_mode == WB_VIDEO_GFX11) {
-        /* 1bpp modes: black/white. */
-        return (c & 0x01) ? 15 : 0;
     }
     return c;
 }
@@ -8405,7 +8400,7 @@ static bool exec_color(App *app, Parser *p, int current_line) {
         }
     }
 
-    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+    if (app->video_mode == WB_VIDEO_GFX1) {
         /*
            GW-BASIC SCREEN 1: COLOR background[,palette]
            - first argument sets background color (0..15)
@@ -8500,7 +8495,7 @@ static bool exec_screen(App *app, Parser *p, int current_line) {
     }
 
     app->video_mode = (WbVideoMode)spec->mode;
-    if (app->video_mode == WB_VIDEO_GFX1 || app->video_mode == WB_VIDEO_GFX10) {
+    if (app->video_mode == WB_VIDEO_GFX1) {
         app->gfx_cga_palette = 1;
     }
     if (spec->policy_flags & SCREEN_POLICY_ALLOC_GFX) {
