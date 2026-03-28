@@ -15511,7 +15511,8 @@ static void build_ui(App *app) {
     } else {
         gtk_window_set_title(GTK_WINDOW(app->output_win), "Program Output - Wally's Basic");
     }
-    gtk_window_set_transient_for(GTK_WINDOW(app->output_win), GTK_WINDOW(app->win));
+    /* Keep editor/output windows independent so minimizing one does not minimize the other. */
+    gtk_window_set_transient_for(GTK_WINDOW(app->output_win), NULL);
 
     app->accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(app->win), app->accel);
