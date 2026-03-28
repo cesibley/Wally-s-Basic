@@ -15445,6 +15445,7 @@ static void ui_ensure_output_window_visible(App *app)
 {
     if (!app || !app->output_win || app->ui_destroyed) return;
     if (!gtk_widget_get_visible(app->output_win)) gtk_widget_show_all(app->output_win);
+    gtk_window_present(GTK_WINDOW(app->output_win));
     update_window_title(app);
 }
 #endif /* !WBASIC_NO_UI */
