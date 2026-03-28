@@ -35,6 +35,7 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
   - `GET` and `PUT` for graphics array capture/blitting, with `PSET`, `OR`, `AND`, and `XOR` actions on `PUT`
   - `POINT(x,y)` function for reading a pixel color
   - `CLS` clears graphics screens, and `COLOR` supplies the current drawing color used by commands that omit an explicit color
+  - `PALETTE attribute,color` remaps text attributes (including graphics text-overlay colors)
 
 ## Limitations and differences
 - Graphics are available in the GTK UI build, and exported standalone programs now automatically use the GTK runtime when the source uses graphics `SCREEN` modes; CLI/headless runtime mode still reports graphics as unavailable

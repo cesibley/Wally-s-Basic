@@ -1094,6 +1094,7 @@ int gfx_cga_palette; /* SCREEN 1 palette select: 0=green/red/brown, 1=cyan/magen
 /* Text mode COLOR state (0-15) */
 int cur_fg;   /* foreground */
 int cur_bg;   /* background */
+int text_palette_map[16]; /* PALETTE attribute remap table (identity by default) */
 
 /* Per-cell color buffers for screen model (same size as screen[]) */
 unsigned char *screen_fg;
@@ -1237,6 +1238,30 @@ static inline bool wbasic_has_ui_buffers(const App *app) {
     return app && !app->ui_destroyed && app->editor_buf && app->output_buf;
 }
 
+static bool is_word_boundary(char c);
+static bool starts_ci(const char *s, const char *p);
+
+static inline void reset_text_palette_map(App *app) {
+    if (!app) return;
+    for (int i = 0; i < 16; i++) app->text_palette_map[i] = i;
+}
+
+static inline int resolve_text_palette_color(const App *app, int color_idx) {
+    if (color_idx == 16) return 16; /* WBASIC default color sentinel */
+    int idx = color_idx & 0x0F;
+    if (!app) return idx;
+    return app->text_palette_map[idx] & 0x0F;
+}
+
+static inline bool match_palette_keyword_ci(const char *s, int *kw_len) {
+    if (!s) return false;
+    if (starts_ci(s, "PALETTE") && is_word_boundary(s[7])) {
+        if (kw_len) *kw_len = 7;
+        return true;
+    }
+    return false;
+}
+
 
 
 
@@ -1281,7 +1306,7 @@ static void headless_stdout_prepare_ansi(void) {
 static inline void headless_ansi_move(int row, int col);
 static inline void headless_ansi_clear(void);
 static inline void headless_ansi_color_cache_reset(void);
-static inline void headless_ansi_apply_color(int fg, int bg);
+static inline void headless_ansi_apply_color(const App *app, int fg, int bg);
 
 /*
    Headless ANSI color caches.
@@ -1333,7 +1358,7 @@ static void wbasic_cli_write_text_ansi(App *app, const char *s)
         */
         if (headless_stdout_is_tty()) {
             if (bol || fg != headless_last_fg || bg != headless_last_bg) {
-                headless_ansi_apply_color(fg, bg);
+                headless_ansi_apply_color(app, fg, bg);
             }
         }
         if (bol) bol = false;
@@ -2494,6 +2519,9 @@ static WB_UNUSED void ensure_color_tag(App *app, int fg, int bg, char tagname_ou
     if (fg > 16) fg = 16;
     if (bg > 16) bg = 16;
 
+    if (fg != 16) fg = resolve_text_palette_color(app, fg);
+    if (bg != 16) bg = resolve_text_palette_color(app, bg);
+
     snprintf(tagname_out, 32, "clr_%d_%d", fg, bg);
 
     GtkTextTagTable *tt = gtk_text_buffer_get_tag_table(app->output_buf);
@@ -2587,7 +2615,7 @@ static void ui_color_idx_to_rgb(const App *app, int idx, double *r, double *g, d
         }
         idx = for_bg ? 0 : 7;
     }
-    idx = gfx_mode_palette_index(app, idx);
+    idx = resolve_text_palette_color(app, idx);
     *r = (double)vga16_rgb[idx & 0x0F][0] / 255.0;
     *g = (double)vga16_rgb[idx & 0x0F][1] / 255.0;
     *b = (double)vga16_rgb[idx & 0x0F][2] / 255.0;
@@ -2958,7 +2986,7 @@ static inline void headless_ansi_color_cache_reset(void) {
     headless_last_bg = -1;
 }
 
-static inline void headless_ansi_apply_color(int fg, int bg) {
+static inline void headless_ansi_apply_color(const App *app, int fg, int bg) {
     /* GW-BASIC/CGA indices -> ANSI SGR codes */
     static const int fg_map[16] = {
         30, /* 0 black */
@@ -2982,6 +3010,9 @@ static inline void headless_ansi_apply_color(int fg, int bg) {
         40, 44, 42, 46, 41, 45, 43, 47,
         100, 104, 102, 106, 101, 105, 103, 107
     };
+
+    if (fg != 16) fg = resolve_text_palette_color(app, fg);
+    if (bg != 16) bg = resolve_text_palette_color(app, bg);
 
     /* 16 means "default" in WBASIC */
     if (fg == 16 && bg == 16) {
@@ -6440,7 +6471,7 @@ static bool is_reserved_basic_keyword_ci(const char *id, size_t len) {
         "DATA","DEF","DEFDBL","DEFINT","DEFSNG","DEFSTR","DELETE","DIM","DO","DRAW","EDIT",
         "ELSE","END","ERASE","ERROR","FIELD","FILES","FOR","GET","GOSUB","GOTO","IF","INPUT",
         "KEY","KILL","LET","LINE","LIST","LOAD","LOCATE","LOOP","LPRINT","LSET","MERGE",
-        "MID$","NAME","NEW","NEXT","NOT","ON","OPEN","OPTION","OR","OUT","PAINT","PLAY",
+        "MID$","NAME","NEW","NEXT","NOT","ON","OPEN","OPTION","OR","OUT","PAINT","PALETTE","PLAY",
         "POKE","PRESET","PRINT","PSET","PUT","RANDOMIZE","READ","REM","RENUM","RESET","RESTORE",
         "RESUME","RETURN","RSET","RUN","SAVE","SCREEN","SEEK","SOUND","STEP","STOP","SWAP",
         "SYSTEM","THEN","TO","TROFF","TRON","USING","VIEW","WEND","WHILE","WIDTH","WINDOW","WRITE"
@@ -8429,6 +8460,47 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     }
 
     // Changing COLOR affects subsequent output; existing buffer remains as-is.
+    return true;
+}
+
+static bool exec_palette(App *app, Parser *p, int current_line) {
+    if (!app || !p) return false;
+    skip_ws(p);
+
+    double attr_v = 0.0;
+    if (!parse_expr(app, p, &attr_v)) {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    int attr = (int)llround(attr_v);
+
+    skip_ws(p);
+    if (*p->s != ',') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    p->s++;
+
+    double color_v = 0.0;
+    if (!parse_expr(app, p, &color_v)) {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    int color = (int)llround(color_v);
+
+    skip_ws(p);
+    if (*p->s != '\0') {
+        runtime_error(app, current_line, "Syntax error");
+        return false;
+    }
+    if (attr < 0 || attr > 15 || color < 0 || color > 15) {
+        runtime_error(app, current_line, "Bad color");
+        return false;
+    }
+
+    app->text_palette_map[attr] = color;
+    headless_ansi_color_cache_reset();
+    if (wbasic_ui_active(app)) screen_render(app);
     return true;
 }
 
@@ -11857,6 +11929,15 @@ if (starts_ci(s, "COLOR") && is_word_boundary(s[5])) {
     free(tmp);
     return ok;
 }
+{
+    int palette_kw_len = 0;
+    if (match_palette_keyword_ci(s, &palette_kw_len)) {
+        Parser p = { s + palette_kw_len };
+        bool ok = exec_palette(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
+}
 
 
     // OPTION BASE
@@ -12679,6 +12760,13 @@ if (starts_ci(s, "WEND") && is_word_boundary(s[4])) {
         free(tmp);
         return ok;
     }
+    int palette_kw_len = 0;
+    if (match_palette_keyword_ci(s, &palette_kw_len)) {
+        Parser p = { s + palette_kw_len };
+        bool ok = exec_palette(app, &p, current_line);
+        free(tmp);
+        return ok;
+    }
 
     // LET (optional)
     if (starts_ci(s, "LET") && is_word_boundary(s[3])) {
@@ -13398,6 +13486,7 @@ static void do_run(App *app) {
 #endif
 
     run_apply_default_screen0(app);
+    reset_text_palette_map(app);
 
         // Ensure each RUN starts with Preferences exact colors (until BASIC COLOR is used).
         app->cur_fg = 16;
@@ -13468,6 +13557,7 @@ static bool exec_run_stmt(App *app, const char *s, int current_line, int *line_i
 
     /* Reset colors to preference defaults until BASIC COLOR is used */
     run_apply_default_screen0(app);
+    reset_text_palette_map(app);
     app->cur_fg = 16;
     app->cur_bg = 16;
         if (!wbasic_ui_active(app) && headless_stdout_is_tty()) {
@@ -15815,6 +15905,7 @@ if (out_buildlog) {
 static int wbasic_run_headless_from_text(int argc, char **argv, const char *source_text) {
     App app;
     memset(&app, 0, sizeof(app));
+    reset_text_palette_map(&app);
 
     /* Default speed: Fast (may be overridden by embedded define or --speed). */
     app.output_speed = 1.0;
@@ -15952,6 +16043,7 @@ int wbasic_run_embedded(int argc, char **argv, const char *source_text) {
 
     App app;
     memset(&app, 0, sizeof(app));
+    reset_text_palette_map(&app);
     app.key_trap_enabled = true;
     app.on_key_pending = -1;
     app.on_key_in_progress = false;
@@ -16269,6 +16361,7 @@ gtk_init(&argc, &argv);
 
     App app;
     memset(&app, 0, sizeof(app));
+    reset_text_palette_map(&app);
     // GW-BASIC KEY macro defaults
     app.key_trap_enabled = true;
     app.on_key_pending = -1;
