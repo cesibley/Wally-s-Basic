@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Implemented `PALETTE attribute,color` statement support.
+  - `PALETTE` is now parsed as a statement (no fallback into assignment parsing).
+  - Text attribute remapping now applies to both GTK rendering and ANSI headless output.
+  - Existing text on-screen re-renders immediately after a palette remap.
+
 - Fixed keyword-led colon statement splitting regressions in the interpreter.
   - `CLEAR:COLOR 12,0:CLS:KEY OFF` now executes all chained statements correctly instead of treating `CLEAR:` like a symbolic label prefix.
   - Nested loop chains like `...:NEXT:NEXT` now split and execute both `NEXT` statements correctly.
