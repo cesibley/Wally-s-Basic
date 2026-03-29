@@ -11,13 +11,13 @@ This audit compares WBASIC's currently implemented feature set against commonly 
 2. Inspect WBASIC's numeric and string intrinsic function handling in `wbasic.c`.
 3. Compare that implemented set to the standard GW-BASIC non-graphics/non-sound command/function families.
 
-## Implemented WBASIC baseline (detected in source)
+## Implemented WBASIC baseline (detected in source review of `wbasic.c`)
 ### Statements / commands present
-`AUTO, BEEP, CLEAR, CLOSE, CLS, COLOR, DATA, DEF, DEFDBL, DEFINT, DEFSNG, DEFSTR, DIM, DO/LOOP, ELSE/ELSEIF/ENDIF, END, ERASE, EXIT DO, FIELD, FOR/NEXT, GET, GOSUB, GOTO, IF, INPUT, KEY, LET, LINE INPUT, LIST, LOAD, LOCATE, LSET, NEW, ON, OPEN, OPTION BASE, PRINT, PUT, RANDOMIZE, READ, REDIM, REM, RENUM, RESTORE, RESUME, RETURN, RSET, RUN, SAVE, SEEK, SPEED (WBASIC extension), STOP, SWAP, SYSTEM, TIMER, WEND/WHILE, WIDTH, WRITE`.
+`AUTO, BEEP, CLEAR, CLOSE, CLS, COLOR, DATA, DEF FN, DEF SEG, DEFDBL, DEFINT, DEFSNG, DEFSTR, DIM, DO/LOOP, ELSE/ELSEIF/ENDIF, END, ERASE, ERROR, EXIT DO, FIELD, FOR/NEXT, GET, GOSUB, GOTO, IF, INPUT, KEY, LET, LINE INPUT, LIST, LOAD, LOCATE, LSET, NEW, ON (GOTO/GOSUB), ON ERROR GOTO, ON KEY(n) GOSUB, ON TIMER(n) GOSUB, OPEN, OPTION BASE, POKE, PRINT, PUT, RANDOMIZE, READ, REDIM, REM, RENUM, RESTORE, RESUME, RETURN, RSET, RUN, SAVE, SEEK, SPEED (WBASIC extension), STOP, SWAP, SYSTEM, TIMER ON/OFF/STOP, WEND/WHILE, WIDTH, WRITE`.
 
 ### Functions present
-- Numeric: `ABS, ASC, ATN, CINT, COS, CVD, CVI, CVS, EOF, ERL, ERR, EXP, FIX, INSTR, INT, LBOUND, LEN, LOF, LOG, PI, RND, SEEK, SGN, SIN, SQR, TAN, TIMER, UBOUND, VAL`.
-- String: `CHR$, DATE$, HEX$, LEFT$, LTRIM$, MID$, MKD$, MKI$, MKS$, OCT$, RIGHT$, RTRIM$, SPACE$, SPC, STR$, STRING$, TAB, TIME$, TRIM$, UCASE$, LCASE$, INPUT$, INKEY$`.
+- Numeric: `ABS, ASC, ATN, CINT, COS, CVD, CVI, CVS, EOF, ERL, ERR, EXP, FIX, INSTR, INT, LBOUND, LEN, LOF, LOG, PI, PEEK, RND, SEEK, SGN, SIN, SQR, TAN, TIMER, UBOUND, VAL`.
+- String: `CHR$, DATE$, HEX$, INKEY$, INPUT$, LCASE$, LEFT$, LTRIM$, MID$, MKD$, MKI$, MKS$, OCT$, RIGHT$, RTRIM$, SPACE$, SPC, STR$, STRING$, TAB, TIME$, TRIM$, UCASE$`.
 
 ## Compatibility gaps found (items not implemented)
 
@@ -31,7 +31,6 @@ This audit compares WBASIC's currently implemented feature set against commonly 
 - Missing: `EDIT` (line editor command).
 - Missing: `LLIST` / `LPRINT` (printer listing/output family).
 - Missing: `TRON` / `TROFF` (trace on/off).
--
 ### 2) Disk and OS/file-management command family
 - Missing: `FILES`.
 - Missing: `KILL`.
@@ -50,7 +49,8 @@ WBASIC supports core sequential/random file I/O (`OPEN/CLOSE/INPUT#/PRINT#/WRITE
   - `ON COM(n)`.
 
 ### 4) Memory/machine-level and low-level I/O compatibility gaps
-- Missing: `DEF SEG`, `POKE`, `PEEK`, `WAIT`.
+- Implemented: `DEF SEG`, `POKE`, `PEEK`.
+- Missing: `WAIT`.
 - Missing: `INP`, `OUT`.
 - Missing binary memory transfer commands: `BLOAD`, `BSAVE`.
 - Missing external-call hooks: `CALL`, `USR`.
@@ -72,7 +72,7 @@ WBASIC includes `MKI$/MKS$/MKD$` and `CVI/CVS/CVD`, but does **not** currently e
 
 ## Practical compatibility impact summary
 - **High impact on old utility/admin programs**: file-management and DOS command gaps (`FILES`, `KILL`, `NAME`, `SHELL`, directory commands).
-- **High impact on hardware/port-oriented legacy software**: missing memory/port access (`PEEK/POKE/INP/OUT/WAIT/DEF SEG/BLOAD/BSAVE/CALL/USR`).
+- **High impact on hardware/port-oriented legacy software**: partial low-level compatibility remains (`DEF SEG/PEEK/POKE` exist, but `INP/OUT/WAIT/BLOAD/BSAVE/CALL/USR` are still missing).
 - **Medium impact on debugging workflows**: no `TRON/TROFF`, no `CONT`.
 - **Low-to-medium impact on pure educational BASIC code**: most core control flow, arrays, strings, numeric math, DATA/READ, and file record I/O are present.
 
@@ -80,6 +80,5 @@ WBASIC includes `MKI$/MKS$/MKD$` and `CVI/CVS/CVD`, but does **not** currently e
 1. `CONT`, `DELETE`, `TRON/TROFF`.
 2. `FILES`, `KILL`, `NAME`, `CHDIR/MKDIR/RMDIR`, `SHELL`.
 3. `FRE`, `POS`, `CSRLIN`, `LPOS`.
-4. `DEF SEG`, `PEEK/POKE`, `INP/OUT`, `WAIT`.
+4. `INP/OUT`, `WAIT`.
 5. `BLOAD/BSAVE`, then optional `CALL/USR` compatibility strategy.
-

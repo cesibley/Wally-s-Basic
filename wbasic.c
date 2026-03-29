@@ -14573,12 +14573,28 @@ static void on_menu_prefs(GtkMenuItem *mi, gpointer user_data) { (void)mi; show_
 typedef enum { EDIT_CUT=1, EDIT_COPY=2, EDIT_PASTE=3 } EditAction;
 
 #ifndef WBASIC_NO_UI
+static GtkWidget *app_get_focused_widget(App *app)
+{
+    if (!app) return NULL;
+
+    GtkWidget *focus = NULL;
+    if (app->win && GTK_IS_WINDOW(app->win)) {
+        focus = gtk_window_get_focus(GTK_WINDOW(app->win));
+    }
+    if (!focus && app->output_win && GTK_IS_WINDOW(app->output_win)) {
+        focus = gtk_window_get_focus(GTK_WINDOW(app->output_win));
+    }
+    if (!focus) focus = app->editor_view ? app->editor_view : app->cmd_entry;
+    return focus;
+}
+#endif /* !WBASIC_NO_UI */
+
+#ifndef WBASIC_NO_UI
 static WB_UNUSED void do_edit_clipboard(App *app, EditAction act)
 {
     if (!app || !app->win) return;
 
-    GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(app->win));
-    if (!focus) focus = app->editor_view ? app->editor_view : app->cmd_entry;
+    GtkWidget *focus = app_get_focused_widget(app);
 
     /* GtkEntry (and other editables) */
     if (focus && GTK_IS_EDITABLE(focus)) {
@@ -14616,8 +14632,7 @@ static WB_UNUSED void do_edit_select_all(App *app)
 {
     if (!app || !app->win) return;
 
-    GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(app->win));
-    if (!focus) focus = app->editor_view ? app->editor_view : app->cmd_entry;
+    GtkWidget *focus = app_get_focused_widget(app);
 
     if (focus && GTK_IS_EDITABLE(focus)) {
         gtk_editable_select_region(GTK_EDITABLE(focus), 0, -1);
@@ -15607,6 +15622,7 @@ static void build_ui(App *app) {
 
     app->accel = gtk_accel_group_new();
     gtk_window_add_accel_group(GTK_WINDOW(app->win), app->accel);
+    gtk_window_add_accel_group(GTK_WINDOW(app->output_win), app->accel);
     if (app->have_win_size && app->win_w > 0 && app->win_h > 0) {
         gtk_window_set_default_size(GTK_WINDOW(app->win), app->win_w, app->win_h);
     } else {
