@@ -142,7 +142,8 @@ static void wbasic_delay_ms(int ms, const WbasicTickle *tickle)
 {
     if (ms <= 0) return;
 
-    const int slice_ms = 20;
+    /* Keep delay slices short so GTK redraw/input stays smooth while throttled. */
+    const int slice_ms = 4;
     int remaining = ms;
 
     while (remaining > 0) {
@@ -180,12 +181,12 @@ static double wbasic_compute_print_delay_ms_f_from_output_speed(double output_sp
     double s = output_speed;
     if (s < 0.0) s = 0.0;
     if (s > 1.0) s = 1.0;
-    /* s=1.0 => 0ms, s=0.0 => 500ms */
+    /* s=1.0 => 0ms, s=0.0 => 10ms */
     double t = 1.0 - s;
-    double curve = pow(t, 4.0);
-    double ms = curve * 500.0;
+    double curve = pow(t, 3.0);
+    double ms = curve * 10.0;
     if (ms < 0.0) ms = 0.0;
-    if (ms > 500.0) ms = 500.0;
+    if (ms > 10.0) ms = 10.0;
     return ms;
 }
 
@@ -611,7 +612,7 @@ static void print_usage(const char *prog)
 {
 #ifdef WBASIC_NO_UI
     fprintf(stderr, "Usage: %s [-s N]\n", prog);
-    fprintf(stderr, "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n");
+    fprintf(stderr, "  -s N, --speed N, --speed=N   Set runtime throttle speed (0=slowest, 100=fastest).\n");
     fprintf(stderr, "  -h, --help                   Show this help and exit.\n");
 #else
     fprintf(stderr, "Usage: %s [-r] [program.bas]\n", prog);
@@ -1902,6 +1903,11 @@ static void ui_pause_wait(App *app) {
 static inline void ui_pump(App *app) {
     ui_pump_raw(app);
     if (app && app->pause_flag) ui_pause_wait(app);
+}
+
+static void wbasic_ui_tickle(void *user) {
+    App *app = (App *)user;
+    ui_pump(app);
 }
 
 // Sleep while keeping the GTK UI responsive.
@@ -3362,11 +3368,13 @@ static WB_UNUSED void prefs_save(App *app) {
         g_key_file_set_string(kf, "ui", "font", app->font_name);
     }
 
-    // Output speed (0.0..1.0)
+    // Default interpreter speed (0.0..1.0), restored on each RUN.
     {
-        double spd = app->output_speed;
+        double spd = app->default_output_speed;
         if (spd < 0.0) spd = 0.0;
         if (spd > 1.0) spd = 1.0;
+        g_key_file_set_double(kf, "ui", "default_output_speed", spd);
+        /* Backward-compat key used by older builds. */
         g_key_file_set_double(kf, "ui", "output_speed", spd);
     }
 
@@ -3460,17 +3468,24 @@ static WB_UNUSED void prefs_load(App *app) {
         g_free(font);
     }
 
-    // Output speed (default to Fast if not present)
+    // Default interpreter speed (default to Fast if not present)
     {
         GError *e2 = NULL;
-        double spd = g_key_file_get_double(kf, "ui", "output_speed", &e2);
+        double spd = g_key_file_get_double(kf, "ui", "default_output_speed", &e2);
+        if (e2) {
+            g_error_free(e2);
+            e2 = NULL;
+            /* Backward-compat fallback for older prefs files. */
+            spd = g_key_file_get_double(kf, "ui", "output_speed", &e2);
+        }
         if (e2) {
             g_error_free(e2);
             // key missing or invalid -> keep current default
         } else {
             if (spd < 0.0) spd = 0.0;
             if (spd > 1.0) spd = 1.0;
-            app->output_speed = spd;
+            app->default_output_speed = spd;
+            app->output_speed = app->default_output_speed;
         // Cache interpreter pacing (tuned curve)
         double t = 1.0 - app->output_speed;
         double curve = pow(t, 2.32);
@@ -7353,6 +7368,13 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
     int x0 = (int)llround(xv);
     int y0 = (int)llround(yv);
     size_t in = ar.start_off + 2;
+    double spd = app->output_speed;
+    if (spd < 0.0) spd = 0.0;
+    if (spd > 1.0) spd = 1.0;
+    double t = 1.0 - spd;
+    bool put_throttle = (t > 0.0001);
+    int put_row_chunk = 1 + (int)floor(spd * 15.0); /* slow=>1 row, fast=>16 rows */
+    int put_slice_ms = 1 + (int)floor(t * 2.0);     /* slow=>3ms, fast=>1ms */
     for (int yy = 0; yy < h; yy++) {
         for (int wr = 0; wr < words_per_row; wr++) {
             unsigned int word = ((unsigned int)llround(ar.v->arr[in++])) & 0xFFFFu;
@@ -7377,6 +7399,9 @@ static bool exec_put_gfx(App *app, Parser *p, int current_line) {
 
             (void)gfx_pset(app, dstx, dsty, outc);
             }
+        }
+        if (put_throttle && ((yy + 1) % put_row_chunk) == 0) {
+            wbasic_delay_ms(put_slice_ms, &app->tickle);
         }
     }
 
@@ -8271,10 +8296,10 @@ static bool exec_speed(App *app, Parser *p, int current_line);
 
 static bool exec_speed(App *app, Parser *p, int current_line)
 {
-    // SPEED n : n=1 (slowest) .. 100 (fastest)
+    // SPEED n : n=0 (slowest) .. 100 (fastest)
     skip_ws(p);
     if (*p->s == 0) {
-        runtime_error(app, current_line, "SPEED expects 1-100");
+        runtime_error(app, current_line, "SPEED expects 0-100");
         return false;
     }
 
@@ -8285,7 +8310,7 @@ static bool exec_speed(App *app, Parser *p, int current_line)
     }
 
     int n = (int)llround(v);
-    if (n < 1) n = 1;
+    if (n < 0) n = 0;
     if (n > 100) n = 100;
 
     if (app) {
@@ -8429,12 +8454,13 @@ static bool exec_color(App *app, Parser *p, int current_line) {
     if (app->video_mode == WB_VIDEO_GFX1) {
         /*
            GW-BASIC SCREEN 1: COLOR background[,palette]
-           - first argument sets background color (0..15)
+           - first argument sets background color
+             (accept 0..31 for compatibility; low 4 bits are used)
            - second argument selects CGA palette (0 or 1)
         */
         if (have_fg) {
-            if (new_fg < 0 || new_fg > 15) { runtime_error(app, current_line, "Bad color"); return false; }
-            app->cur_bg = new_fg;
+            if (new_fg < 0 || new_fg > 31) { runtime_error(app, current_line, "Bad color"); return false; }
+            app->cur_bg = (new_fg & 0x0F);
         }
         if (have_bg) {
             if (!(new_bg == 0 || new_bg == 1)) { runtime_error(app, current_line, "Bad color"); return false; }
@@ -13193,11 +13219,14 @@ static inline void exec_apply_pacing(App *app) {
     app->exec_pace_accum_us += curve * max_us_per_stmt;
 
     // Sleep only in coalesced chunks to reduce overhead.
-    if (app->exec_pace_accum_us >= 1000) {  // coalesce to ~1ms chunks
+    if (app->exec_pace_accum_us >= 1000.0) {  // coalesce to ~1ms chunks
         int us = (int)(app->exec_pace_accum_us);
-        // Cap sleeps so UI stays responsive.
-        if (us > 20000) us = 20000;
-        g_usleep((gulong)us);
+        // Cap sleeps so render/input cadence stays smooth while throttled.
+        if (us > 4000) us = 4000;
+        int sleep_ms = us / 1000;
+        if (sleep_ms > 0) {
+            wbasic_delay_ms(sleep_ms, &app->tickle);
+        }
         app->exec_pace_accum_us -= (double)us;
     }
 }
@@ -14495,6 +14524,20 @@ static void pref_on_show_splash(GtkToggleButton *btn, gpointer user_data)
     prefs_save(app);
 }
 
+static void pref_on_default_speed(GtkRange *rng, gpointer user_data)
+{
+    App *app = (App *)user_data;
+    if (!app) return;
+    int n = (int)llround(gtk_range_get_value(rng));
+    if (n < 1) n = 1;
+    if (n > 100) n = 100;
+    app->default_output_speed = ((double)n) / 100.0;
+    /* Apply immediately so manual RUN uses this baseline now. */
+    app->output_speed = app->default_output_speed;
+    app->print_throttle_carry_ms = 0.0;
+    prefs_save(app);
+}
+
 static void show_preferences(App *app) {
     GtkWidget *dlg = gtk_dialog_new_with_buttons(
         "Preferences",
@@ -14532,6 +14575,17 @@ static void show_preferences(App *app) {
     if (app->font_name && *app->font_name) gtk_font_chooser_set_font(GTK_FONT_CHOOSER(btn_font), app->font_name);
     g_signal_connect(btn_font, "font-set", G_CALLBACK(pref_on_font), app);
 
+    GtkWidget *lbl_interp_speed = gtk_label_new("Interpreter Speed:");
+    gtk_widget_set_halign(lbl_interp_speed, GTK_ALIGN_START);
+    GtkWidget *scale_interp_speed = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1.0, 100.0, 1.0);
+    gtk_scale_set_draw_value(GTK_SCALE(scale_interp_speed), TRUE);
+    gtk_scale_set_digits(GTK_SCALE(scale_interp_speed), 0);
+    int initial_speed = (int)llround(app->default_output_speed * 100.0);
+    if (initial_speed < 1) initial_speed = 1;
+    if (initial_speed > 100) initial_speed = 100;
+    gtk_range_set_value(GTK_RANGE(scale_interp_speed), (double)initial_speed);
+    g_signal_connect(scale_interp_speed, "value-changed", G_CALLBACK(pref_on_default_speed), app);
+
         // Endpoint labels
 
     GtkWidget *btn_reset = gtk_button_new_with_label("Reset Colors");
@@ -14545,6 +14599,8 @@ static void show_preferences(App *app) {
     gtk_grid_attach(GTK_GRID(grid), btn_reset, 1, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), lbl_font, 0, 3, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), btn_font, 1, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), lbl_interp_speed, 0, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), scale_interp_speed, 1, 4, 1, 1);
     GtkWidget *sep_splash = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_set_hexpand(sep_splash, TRUE);
     gtk_widget_set_margin_top(sep_splash, 10);
@@ -14554,8 +14610,8 @@ static void show_preferences(App *app) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_splash), app->show_splash ? TRUE : FALSE);
     g_signal_connect(chk_splash, "toggled", G_CALLBACK(pref_on_show_splash), app);
 
-    gtk_grid_attach(GTK_GRID(grid), sep_splash, 0, 4, 2, 1);
-    gtk_grid_attach(GTK_GRID(grid), chk_splash, 1, 5, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), sep_splash, 0, 5, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), chk_splash, 1, 6, 1, 1);
 
     gtk_widget_show_all(dlg);
     gtk_dialog_run(GTK_DIALOG(dlg));
@@ -16296,7 +16352,7 @@ int wbasic_main(int argc, char **argv) {
         if (argc < 2) {
             fprintf(stderr,
                     "Usage: %s [--cli|--headless] <file.bas> [-s N]\n"
-                    "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n"
+                    "  -s N, --speed N, --speed=N   Set runtime throttle speed (0=slowest, 100=fastest).\n"
                     "  -h, --help                   Show help.\n",
                     (argc > 0 && argv[0]) ? argv[0] : "wbasic");
             return 1;
@@ -16396,6 +16452,8 @@ gtk_init(&argc, &argv);
     app.output_speed = 1.0; // Fast
     app.default_output_speed = app.output_speed;
     app.export_include_speed = false;
+    app.tickle.fn = wbasic_ui_tickle;
+    app.tickle.user = &app;
     // Output cursor starts at 1,1 (top-left) for LOCATE.
     app.out_row = 1;
     app.out_col = 1;
@@ -16465,7 +16523,7 @@ int wbasic_main(int argc, char **argv) {
     if (argc < 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
         fprintf(stderr,
                 "Usage: %s <file.bas> [-s N]\n"
-                "  -s N, --speed N, --speed=N   Set PRINT throttle speed (0=slowest, 100=fastest).\n"
+                "  -s N, --speed N, --speed=N   Set runtime throttle speed (0=slowest, 100=fastest).\n"
                 "  -h, --help                   Show this help and exit.\n",
                 (argc > 0 && argv[0]) ? argv[0] : "wbasic_cli");
         return 1;

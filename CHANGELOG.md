@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fixed a DONKEY compatibility regression surfaced during runtime-throttle work.
+  - Root cause: `DONKEY.BAS` can execute `COLOR 31,0,0` from an `ON ERROR` path while still in `SCREEN 1`; WBASIC's SCREEN 1 `COLOR` parser incorrectly rejected first-argument values above 15.
+  - Why it appeared with throttle updates: throttle work made this fallback path easier to hit/reproduce during demos, exposing the pre-existing strict color-range check.
+  - Fix: SCREEN 1 `COLOR` now accepts `0..31` and uses low 4 bits for the background color while preserving palette handling.
+
 - Implemented `PALETTE attribute,color` statement support.
   - `PALETTE` is now parsed as a statement (no fallback into assignment parsing).
   - Text attribute remapping now applies to both GTK rendering and ANSI headless output.

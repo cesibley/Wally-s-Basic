@@ -56,7 +56,7 @@ The project is primarily for Linux and requires GTK and Glib.  It does compile a
 - `GET`/`PUT` use numeric BASIC arrays as a simple width/height + pixel buffer format
 - Files may be exported to a Linux executable. Text-only exports build as headless standalones, while programs that use graphics `SCREEN` modes automatically export as GTK standalones so graphics programs can run after export
 - Exported graphics standalones open the program output window directly and use the exported program name as the GTK window title
-- SPEED directive added to slow down screen prints to throttle older programs
+- SPEED/--speed runtime throttle controls to slow execution on modern hardware while keeping the UI responsive
 
 ## Building
 GTK build:
@@ -78,6 +78,23 @@ See `docs/windows/README.md` for MSYS2/MinGW setup and build steps.
 ```
 
 The current experimental UI opens the program editor and program output in separate GTK windows. The output window stays hidden at startup and is shown when a program is run. Window size and position are persisted independently for the editor and output windows.
+
+### Runtime throttle controls
+- `SPEED n` (from BASIC code): set throttle speed from `0..100`
+  - `0` = slowest execution
+  - `100` = fastest execution (effectively unthrottled)
+- CLI/headless: `-s N`, `--speed N`, or `--speed=N` with `N` in `0..100`
+- In GUI mode, Preferences includes an **Interpreter Speed** slider (`1..100`) that is persisted and used as the default on each `RUN`.
+
+Examples:
+```basic
+10 SPEED 25
+20 FOR I=1 TO 1000: PRINT I: NEXT
+```
+
+```sh
+./wbasic --cli demos/bench.bas --speed=20
+```
 
 ## Demos
 See the `demos/` directory for example BASIC programs, including Mandelbrot, Julia set, Barnsley fern, and sprite examples.
