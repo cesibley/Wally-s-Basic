@@ -13520,10 +13520,11 @@ bool cont = exec_single_statement(app, stmt, current_line, line_idx, stmt_idx, &
             }
         }
 
-        finish_inkey_wait_after_statement(app);
-
-        // Interpreter-wide speed control (not just output pacing)
+        // Interpreter-wide speed control (not just output pacing).
+        // Apply pacing before finishing INKEY$ wait grace so throttled runs
+        // still present RUN_WAITING during the delay slice.
         exec_apply_pacing(app);
+        finish_inkey_wait_after_statement(app);
 
         /* If a runtime error was trapped via ON ERROR GOTO, override control flow now. */
         if (app->error_trap_pending) {
