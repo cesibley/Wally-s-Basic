@@ -951,8 +951,11 @@ typedef struct App {
     gint64 input_cursor_next_toggle_us; /* monotonic time (usec) for next blink toggle */
 
     // Status indicator (lower-right)
+    GtkWidget *throttle_warning_label;
     GtkWidget *status_led;
     GtkWidget *status_label;
+    guint throttle_warning_flash_id;
+    bool throttle_warning_flash_on;
     RunState run_state;
     bool inkey_ready;
     char inkey_char;
@@ -1666,6 +1669,50 @@ static const char *run_state_text(RunState st) {
 #endif /* !WBASIC_NO_UI */
 
 #ifndef WBASIC_NO_UI
+static int app_speed_percent(const App *app) {
+    if (!app) return 100;
+    int n = (int)llround(app->output_speed * 100.0);
+    if (n < 0) n = 0;
+    if (n > 100) n = 100;
+    return n;
+}
+
+static void ui_update_throttle_warning(App *app) {
+    if (!app || !app->throttle_warning_label) return;
+
+    if (app->run_state == RUN_STOPPED) {
+        gtk_widget_set_opacity(app->throttle_warning_label, 0.0);
+        app->throttle_warning_flash_on = true;
+        return;
+    }
+
+    bool throttled = (app_speed_percent(app) != 100);
+    if (!throttled) {
+        gtk_label_set_markup(GTK_LABEL(app->throttle_warning_label),
+                             "<span foreground='#5a5a5a' weight='bold'>THROTTLE</span>");
+        gtk_widget_set_opacity(app->throttle_warning_label, 0.0);
+        app->throttle_warning_flash_on = true;
+        return;
+    }
+
+    app->throttle_warning_flash_on = !app->throttle_warning_flash_on;
+    if (app->throttle_warning_flash_on) {
+        gtk_label_set_markup(GTK_LABEL(app->throttle_warning_label),
+                             "<span foreground='#ff3030' weight='bold'>THROTTLE</span>");
+    } else {
+        gtk_label_set_markup(GTK_LABEL(app->throttle_warning_label),
+                             "<span foreground='#5a0000' weight='bold'>THROTTLE</span>");
+    }
+    gtk_widget_set_opacity(app->throttle_warning_label, 1.0);
+}
+
+static gboolean on_throttle_warning_flash(gpointer user_data) {
+    App *app = (App *)user_data;
+    if (!app || app->ui_destroyed) return G_SOURCE_REMOVE;
+    ui_update_throttle_warning(app);
+    return G_SOURCE_CONTINUE;
+}
+
 static void set_run_state(App *app, RunState st) {
     if (!app) return;
     RunState prev = app->run_state;
@@ -1687,6 +1734,10 @@ static void set_run_state(App *app, RunState st) {
     }
 }
 #else
+static void ui_update_throttle_warning(App *app) {
+    (void)app;
+}
+
 static void set_run_state(App *app, RunState st) {
     if (!app) return;
     app->run_state = st;
@@ -3486,6 +3537,7 @@ static WB_UNUSED void prefs_load(App *app) {
             if (spd > 1.0) spd = 1.0;
             app->default_output_speed = spd;
             app->output_speed = app->default_output_speed;
+            ui_update_throttle_warning(app);
         // Cache interpreter pacing (tuned curve)
         double t = 1.0 - app->output_speed;
         double curve = pow(t, 2.32);
@@ -8316,6 +8368,7 @@ static bool exec_speed(App *app, Parser *p, int current_line)
     if (app) {
         app->output_speed = (double)n / 100.0;
         app->print_throttle_carry_ms = 0.0;
+        ui_update_throttle_warning(app);
     }
     return true;
 }
@@ -13254,6 +13307,7 @@ static void runtime_reset(App *app) {
     /* Reset SPEED on each RUN (uses CLI/embedded/default baseline) */
     app->output_speed = app->default_output_speed;
     app->print_throttle_carry_ms = 0.0;
+    ui_update_throttle_warning(app);
 
     // clear stacks
     for (int i = 0; i < app->for_sp; i++) free(app->for_stack[i].var_name);
@@ -14535,6 +14589,7 @@ static void pref_on_default_speed(GtkRange *rng, gpointer user_data)
     /* Apply immediately so manual RUN uses this baseline now. */
     app->output_speed = app->default_output_speed;
     app->print_throttle_carry_ms = 0.0;
+    ui_update_throttle_warning(app);
     prefs_save(app);
 }
 
@@ -15063,8 +15118,13 @@ static void on_win_destroy(GtkWidget *w, gpointer user_data) {
     app->cmd_entry = NULL;
     app->editor_view = NULL;
     app->output_view = NULL;
+    app->throttle_warning_label = NULL;
     app->status_led = NULL;
     app->status_label = NULL;
+    if (app->throttle_warning_flash_id) {
+        g_source_remove(app->throttle_warning_flash_id);
+        app->throttle_warning_flash_id = 0;
+    }
 
     prefs_save(app);
     gtk_main_quit();
@@ -15761,6 +15821,8 @@ static void build_ui(App *app) {
     gtk_box_pack_start(GTK_BOX(editor_vbox), hbox, FALSE, FALSE, 8);
     gtk_box_pack_start(GTK_BOX(hbox), gtk_label_new("Command:"), FALSE, FALSE, 8);
     app->cmd_entry = gtk_entry_new();
+    gtk_widget_set_hexpand(app->cmd_entry, TRUE);
+    gtk_widget_set_margin_end(app->cmd_entry, 24);
     gtk_box_pack_start(GTK_BOX(hbox), app->cmd_entry, TRUE, TRUE, 8);
 
     GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -15768,7 +15830,14 @@ static void build_ui(App *app) {
 
     app->status_label = gtk_label_new("Idle");
     gtk_label_set_xalign(GTK_LABEL(app->status_label), 1.0);
+    gtk_label_set_width_chars(GTK_LABEL(app->status_label), 8);
+    gtk_label_set_max_width_chars(GTK_LABEL(app->status_label), 8);
     gtk_widget_set_halign(app->status_label, GTK_ALIGN_END);
+
+    app->throttle_warning_label = gtk_label_new(NULL);
+    gtk_label_set_use_markup(GTK_LABEL(app->throttle_warning_label), TRUE);
+    gtk_widget_set_halign(app->throttle_warning_label, GTK_ALIGN_END);
+    gtk_label_set_width_chars(GTK_LABEL(app->throttle_warning_label), 8);
 
     app->status_led = gtk_drawing_area_new();
     gtk_widget_set_size_request(app->status_led, 16, 16);
@@ -15777,8 +15846,12 @@ static void build_ui(App *app) {
 
     app->run_state = RUN_IDLE;
 
+    gtk_widget_set_margin_end(app->throttle_warning_label, 12);
+    gtk_box_pack_start(GTK_BOX(status_box), app->throttle_warning_label, FALSE, FALSE, 4);
     gtk_box_pack_start(GTK_BOX(status_box), app->status_label, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(status_box), app->status_led, FALSE, FALSE, 0);
+    app->throttle_warning_flash_id = g_timeout_add(400, on_throttle_warning_flash, app);
+    ui_update_throttle_warning(app);
 
     gtk_box_pack_end(GTK_BOX(hbox), status_box, FALSE, FALSE, 4);
     g_signal_connect(app->cmd_entry, "activate", G_CALLBACK(on_cmd_activate), app);
